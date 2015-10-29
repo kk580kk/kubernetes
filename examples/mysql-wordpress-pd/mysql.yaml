@@ -14,7 +14,7 @@ spec:
       env:
         - name: MYSQL_ROOT_PASSWORD
           # change this
-          value: 
+          value: Q!W@e3r4 
       ports: 
         - containerPort: 3306
           name: mysql
@@ -23,5 +23,5 @@ spec:
           name: data
   volumes:
   - hostPath: 
-    path: /root/mysql
+    path: /var/lib/docker
     name: data
