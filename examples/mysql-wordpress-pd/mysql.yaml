@@ -14,18 +14,14 @@ spec:
       env:
         - name: MYSQL_ROOT_PASSWORD
           # change this
-          value: yourpassword
+          value: 
       ports: 
         - containerPort: 3306
           name: mysql
       volumeMounts:
-          # name must match the volume name below
-        - name: mysql-persistent-storage
-          # mount path within the container
-          mountPath: /var/lib/mysql
+        - mountPath: /var/lib/mysql
+          name: data
   volumes:
-    - name: mysql-persistent-storage
-      gcePersistentDisk:
-        # This GCE PD must already exist.
-        pdName: mysql-disk
-        fsType: ext4
+  - hostPath: 
+    path: /root/mysql
+    name: data
