@@ -10,8 +10,9 @@ spec:
       name: wordpress
       env:
         - name: WORDPRESS_DB_PASSWORD
-          # change this - must match mysql.yaml password
-          value: yourpassword
+          value: Q!W@e3r4
+        - name: WORDPRESS_DB_HOST
+          value: 10.254.43.97
       ports: 
         - containerPort: 80
           name: wordpress
@@ -22,7 +23,5 @@ spec:
           mountPath: /var/www/html
   volumes:
     - name: wordpress-persistent-storage
-      gcePersistentDisk:
-        # This GCE PD must already exist.
-        pdName: wordpress-disk
-        fsType: ext4
+      hostPath:
+        path: /var/lib/docker/wordpress-html

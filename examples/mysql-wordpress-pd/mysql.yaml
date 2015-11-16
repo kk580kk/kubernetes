@@ -14,7 +14,7 @@ spec:
       env:
         - name: MYSQL_ROOT_PASSWORD
           # change this
-          value: Q!W@e3r4 
+          value: Q!W@e3r4
       ports: 
         - containerPort: 3306
           name: mysql
@@ -23,5 +23,5 @@ spec:
           name: data
   volumes:
   - hostPath: 
-    path: /var/lib/docker
+    path: /var/lib/docker/wordpress-mysql
     name: data
