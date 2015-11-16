@@ -53,6 +53,10 @@ func (eventStrategy) Validate(ctx api.Context, obj runtime.Object) fielderrors.V
 	return validation.ValidateEvent(event)
 }
 
+// Canonicalize normalizes the object after validation.
+func (eventStrategy) Canonicalize(obj runtime.Object) {
+}
+
 func (eventStrategy) AllowCreateOnUpdate() bool {
 	return true
 }
@@ -80,7 +84,7 @@ func getAttrs(obj runtime.Object) (objLabels labels.Set, objFields fields.Set, e
 		l = labels.Set{}
 	}
 
-	objectMetaFieldsSet := generic.ObjectMetaFieldsSet(event.ObjectMeta)
+	objectMetaFieldsSet := generic.ObjectMetaFieldsSet(event.ObjectMeta, true)
 	specificFieldsSet := fields.Set{
 		"involvedObject.kind":            event.InvolvedObject.Kind,
 		"involvedObject.namespace":       event.InvolvedObject.Namespace,

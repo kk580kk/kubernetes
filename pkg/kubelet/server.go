@@ -48,6 +48,7 @@ import (
 	"k8s.io/kubernetes/pkg/healthz"
 	"k8s.io/kubernetes/pkg/httplog"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
+	"k8s.io/kubernetes/pkg/kubelet/dockertools"
 	"k8s.io/kubernetes/pkg/kubelet/portforward"
 	"k8s.io/kubernetes/pkg/types"
 	"k8s.io/kubernetes/pkg/util"
@@ -306,6 +307,9 @@ func (s *Server) InstallDebuggingHandlers() {
 	ws.Route(ws.GET("").
 		To(s.getLogs).
 		Operation("getLogs"))
+	ws.Route(ws.GET("/{logpath:*}").
+		To(s.getLogs).
+		Operation("getLogs"))
 	s.restfulCont.Add(ws)
 
 	ws = new(restful.WebService)
@@ -369,7 +373,7 @@ func (s *Server) dockerHealthCheck(req *http.Request) error {
 		return errors.New("unknown Docker version")
 	}
 	// Verify the docker version.
-	result, err := version.Compare("1.15")
+	result, err := version.Compare(dockertools.MinimumDockerAPIVersion)
 	if err != nil {
 		return err
 	}

@@ -56,6 +56,10 @@ import (
 )
 
 const (
+	DockerType = "docker"
+
+	MinimumDockerAPIVersion = "1.18"
+
 	maxReasonCacheEntries = 200
 
 	// ndots specifies the minimum number of dots that a domain name must contain for the resolver to consider it as FQDN (fully-qualified)
@@ -68,12 +72,6 @@ const (
 	// TODO: evaluate whether there are scenarios in which SIGKILL is preferable to
 	// SIGTERM for certain process types, which may justify setting this to 0.
 	minimumGracePeriodInSeconds = 2
-
-	kubernetesNameLabel                   = "io.kubernetes.pod.name"
-	kubernetesPodLabel                    = "io.kubernetes.pod.data"
-	kubernetesTerminationGracePeriodLabel = "io.kubernetes.pod.terminationGracePeriod"
-	kubernetesContainerLabel              = "io.kubernetes.container.name"
-	kubernetesContainerRestartCountLabel  = "io.kubernetes.container.restartCount"
 
 	DockerNetnsFmt = "/proc/%v/ns/net"
 )
@@ -218,9 +216,9 @@ func NewDockerManager(
 	}
 	dm.runner = lifecycle.NewHandlerRunner(httpClient, dm, dm)
 	if serializeImagePulls {
-		dm.imagePuller = kubecontainer.NewSerializedImagePuller(recorder, dm, imageBackOff)
+		dm.imagePuller = kubecontainer.NewSerializedImagePuller(kubecontainer.FilterEventRecorder(recorder), dm, imageBackOff)
 	} else {
-		dm.imagePuller = kubecontainer.NewImagePuller(recorder, dm, imageBackOff)
+		dm.imagePuller = kubecontainer.NewImagePuller(kubecontainer.FilterEventRecorder(recorder), dm, imageBackOff)
 	}
 	dm.containerGC = NewContainerGC(client, containerLogsDir)
 
@@ -290,7 +288,7 @@ func (dm *DockerManager) GetContainerLogs(pod *api.Pod, containerID kubecontaine
 		RawTerminal:  false,
 	}
 
-	if !logOptions.Follow && logOptions.TailLines != nil {
+	if logOptions.TailLines != nil {
 		opts.Tail = strconv.FormatInt(*logOptions.TailLines, 10)
 	}
 
@@ -316,8 +314,6 @@ type containerStatusResult struct {
 	err    error
 }
 
-const podIPDownwardAPISelector = "status.podIP"
-
 // determineContainerIP determines the IP address of the given container.  It is expected
 // that the container passed is the infrastructure container of a pod and the responsibility
 // of the caller to ensure that the correct container is passed.
@@ -340,7 +336,7 @@ func (dm *DockerManager) determineContainerIP(podNamespace, podName string, cont
 	return result
 }
 
-func (dm *DockerManager) inspectContainer(dockerID, containerName, tPath string, pod *api.Pod) *containerStatusResult {
+func (dm *DockerManager) inspectContainer(dockerID, containerName string, pod *api.Pod) *containerStatusResult {
 	result := containerStatusResult{api.ContainerStatus{}, "", nil}
 
 	inspectResult, err := dm.client.InspectContainer(dockerID)
@@ -359,18 +355,9 @@ func (dm *DockerManager) inspectContainer(dockerID, containerName, tPath string,
 
 	glog.V(4).Infof("Container inspect result: %+v", *inspectResult)
 
-	// Get restartCount from docker label, and add into the result.
-	// If there is no restart count label in an container:
-	//	1. It is an infraContainer, it will never use restart count.
-	//	2. It is an old container or an invalid container, we just set restart count to 0 now.
 	var restartCount int
-	if restartCountString, found := inspectResult.Config.Labels[kubernetesContainerRestartCountLabel]; found {
-		restartCount, err = strconv.Atoi(restartCountString)
-		if err != nil {
-			glog.Errorf("Error parsing restart count string %s for container %s: %v,", restartCountString, dockerID, err)
-			// Just set restartCount to 0 to handle this abnormal case
-			restartCount = 0
-		}
+	if restartCount, err = getRestartCountFromLabel(inspectResult.Config.Labels); err != nil {
+		glog.Errorf("Get restart count error for container %v: %v", dockerID, err)
 	}
 
 	result.status = api.ContainerStatus{
@@ -419,8 +406,9 @@ func (dm *DockerManager) inspectContainer(dockerID, containerName, tPath string,
 			FinishedAt:  finishedAt,
 			ContainerID: DockerPrefix + dockerID,
 		}
-		if tPath != "" {
-			path, found := inspectResult.Volumes[tPath]
+		terminationMessagePath := getTerminationMessagePathFromLabel(inspectResult.Config.Labels)
+		if terminationMessagePath != "" {
+			path, found := inspectResult.Volumes[terminationMessagePath]
 			if found {
 				data, err := ioutil.ReadFile(path)
 				if err != nil {
@@ -461,6 +449,9 @@ func (dm *DockerManager) GetPodStatus(pod *api.Pod) (*api.PodStatus, error) {
 	}
 	expectedContainers[PodInfraContainerName] = api.Container{}
 
+	// We have added labels like pod name and pod namespace, it seems that we can do filtered list here.
+	// However, there may be some old containers without these labels, so at least now we can't do that.
+	// TODO (random-liu) Add filter when we are sure that all the containers have the labels
 	containers, err := dm.client.ListContainers(docker.ListContainersOptions{All: true})
 	if err != nil {
 		return nil, err
@@ -471,7 +462,6 @@ func (dm *DockerManager) GetPodStatus(pod *api.Pod) (*api.PodStatus, error) {
 	// the statuses. We assume docker returns a list of containers sorted in
 	// reverse by time.
 	for _, value := range containers {
-		// TODO (random-liu) Filter by docker label later
 		if len(value.Names) == 0 {
 			continue
 		}
@@ -486,17 +476,16 @@ func (dm *DockerManager) GetPodStatus(pod *api.Pod) (*api.PodStatus, error) {
 			continue
 		}
 		dockerContainerName := dockerName.ContainerName
-		c, found := expectedContainers[dockerContainerName]
+		_, found := expectedContainers[dockerContainerName]
 		if !found {
 			continue
 		}
-		terminationMessagePath := c.TerminationMessagePath
 		if containerDone.Has(dockerContainerName) {
 			continue
 		}
 
 		// Inspect the container.
-		result := dm.inspectContainer(value.ID, dockerContainerName, terminationMessagePath, pod)
+		result := dm.inspectContainer(value.ID, dockerContainerName, pod)
 		if result.err != nil {
 			return nil, result.err
 		}
@@ -688,7 +677,7 @@ func (dm *DockerManager) runContainer(
 	ipcMode string,
 	utsMode string,
 	pidMode string,
-	labels map[string]string) (kubecontainer.ContainerID, error) {
+	restartCount int) (kubecontainer.ContainerID, error) {
 
 	dockerName := KubeletContainerName{
 		PodFullName:   kubecontainer.GetPodFullName(pod),
@@ -709,12 +698,8 @@ func (dm *DockerManager) runContainer(
 	// while the Kubelet is down and there is no information available to recover the pod. This includes
 	// termination information like the termination grace period and the pre stop hooks.
 	// TODO: keep these labels up to date if the pod changes
-	namespacedName := types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}
-	// Just in case. If there is no label, just pass nil. An empty map will be created here.
-	if labels == nil {
-		labels = map[string]string{}
-	}
-	labels[kubernetesNameLabel] = namespacedName.String()
+	labels := newLabels(container, pod, restartCount)
+
 	if pod.Spec.TerminationGracePeriodSeconds != nil {
 		labels[kubernetesTerminationGracePeriodLabel] = strconv.FormatInt(*pod.Spec.TerminationGracePeriodSeconds, 10)
 	}
@@ -772,15 +757,11 @@ func (dm *DockerManager) runContainer(
 	securityContextProvider.ModifyContainerConfig(pod, container, dockerOpts.Config)
 	dockerContainer, err := dm.client.CreateContainer(dockerOpts)
 	if err != nil {
-		if ref != nil {
-			dm.recorder.Eventf(ref, "Failed", "Failed to create docker container with error: %v", err)
-		}
+		dm.recorder.Eventf(ref, kubecontainer.FailedToCreateContainer, "Failed to create docker container with error: %v", err)
 		return kubecontainer.ContainerID{}, err
 	}
 
-	if ref != nil {
-		dm.recorder.Eventf(ref, "Created", "Created with docker id %v", util.ShortenString(dockerContainer.ID, 12))
-	}
+	dm.recorder.Eventf(ref, kubecontainer.CreatedContainer, "Created container with docker id %v", util.ShortenString(dockerContainer.ID, 12))
 
 	podHasSELinuxLabel := pod.Spec.SecurityContext != nil && pod.Spec.SecurityContext.SELinuxOptions != nil
 	binds := makeMountBindings(opts.Mounts, podHasSELinuxLabel)
@@ -836,15 +817,12 @@ func (dm *DockerManager) runContainer(
 	securityContextProvider.ModifyHostConfig(pod, container, hc)
 
 	if err = dm.client.StartContainer(dockerContainer.ID, hc); err != nil {
-		if ref != nil {
-			dm.recorder.Eventf(ref, "Failed",
-				"Failed to start with docker id %v with error: %v", util.ShortenString(dockerContainer.ID, 12), err)
-		}
+		dm.recorder.Eventf(ref, kubecontainer.FailedToStartContainer,
+			"Failed to start container with docker id %v with error: %v", util.ShortenString(dockerContainer.ID, 12), err)
 		return kubecontainer.ContainerID{}, err
 	}
-	if ref != nil {
-		dm.recorder.Eventf(ref, "Started", "Started with docker id %v", util.ShortenString(dockerContainer.ID, 12))
-	}
+	dm.recorder.Eventf(ref, kubecontainer.StartedContainer, "Started container with docker id %v", util.ShortenString(dockerContainer.ID, 12))
+
 	return kubetypes.DockerID(dockerContainer.ID).ContainerID(), nil
 }
 
@@ -1041,6 +1019,10 @@ func (dv dockerVersion) Compare(other string) (int, error) {
 		return 1, nil
 	}
 	return 0, nil
+}
+
+func (dm *DockerManager) Type() string {
+	return DockerType
 }
 
 func (dm *DockerManager) Version() (kubecontainer.Version, error) {
@@ -1324,7 +1306,7 @@ func (dm *DockerManager) KillPod(pod *api.Pod, runningPod kubecontainer.Pod) err
 				return
 			}
 
-			err := dm.KillContainerInPod(container.ID, containerSpec, pod)
+			err := dm.KillContainerInPod(container.ID, containerSpec, pod, "Need to kill pod.")
 			if err != nil {
 				glog.Errorf("Failed to delete container: %v; Skipping pod %q", err, runningPod.ID)
 				errs <- err
@@ -1337,7 +1319,7 @@ func (dm *DockerManager) KillPod(pod *api.Pod, runningPod kubecontainer.Pod) err
 			glog.Errorf("Failed tearing down the infra container: %v", err)
 			errs <- err
 		}
-		if err := dm.KillContainerInPod(networkContainer.ID, networkSpec, pod); err != nil {
+		if err := dm.KillContainerInPod(networkContainer.ID, networkSpec, pod, "Need to kill pod."); err != nil {
 			glog.Errorf("Failed to delete container: %v; Skipping pod %q", err, runningPod.ID)
 			errs <- err
 		}
@@ -1355,7 +1337,7 @@ func (dm *DockerManager) KillPod(pod *api.Pod, runningPod kubecontainer.Pod) err
 
 // KillContainerInPod kills a container in the pod. It must be passed either a container ID or a container and pod,
 // and will attempt to lookup the other information if missing.
-func (dm *DockerManager) KillContainerInPod(containerID kubecontainer.ContainerID, container *api.Container, pod *api.Pod) error {
+func (dm *DockerManager) KillContainerInPod(containerID kubecontainer.ContainerID, container *api.Container, pod *api.Pod, message string) error {
 	switch {
 	case containerID.IsEmpty():
 		// Locate the container.
@@ -1387,12 +1369,12 @@ func (dm *DockerManager) KillContainerInPod(containerID kubecontainer.ContainerI
 			pod = storedPod
 		}
 	}
-	return dm.killContainer(containerID, container, pod)
+	return dm.killContainer(containerID, container, pod, message)
 }
 
 // killContainer accepts a containerID and an optional container or pod containing shutdown policies. Invoke
 // KillContainerInPod if information must be retrieved first.
-func (dm *DockerManager) killContainer(containerID kubecontainer.ContainerID, container *api.Container, pod *api.Pod) error {
+func (dm *DockerManager) killContainer(containerID kubecontainer.ContainerID, container *api.Container, pod *api.Pod, reason string) error {
 	ID := containerID.ID
 	name := ID
 	if container != nil {
@@ -1451,8 +1433,11 @@ func (dm *DockerManager) killContainer(containerID kubecontainer.ContainerID, co
 	if !ok {
 		glog.Warningf("No ref for pod '%q'", name)
 	} else {
-		// TODO: pass reason down here, and state, or move this call up the stack.
-		dm.recorder.Eventf(ref, "Killing", "Killing with docker id %v", util.ShortenString(ID, 12))
+		message := fmt.Sprintf("Killing container with docker id %v", util.ShortenString(ID, 12))
+		if reason != "" {
+			message = fmt.Sprint(message, ": ", reason)
+		}
+		dm.recorder.Event(ref, kubecontainer.KillingContainer, message)
 		dm.containerRefManager.ClearRef(containerID)
 	}
 	return err
@@ -1502,8 +1487,7 @@ func containerAndPodFromLabels(inspect *docker.Container) (pod *api.Pod, contain
 
 // Run a single container from a pod. Returns the docker container ID
 // If do not need to pass labels, just pass nil.
-// TODO (random-liu) Just add labels directly now, maybe should make some abstraction.
-func (dm *DockerManager) runContainerInPod(pod *api.Pod, container *api.Container, netMode, ipcMode, pidMode string, labels map[string]string) (kubecontainer.ContainerID, error) {
+func (dm *DockerManager) runContainerInPod(pod *api.Pod, container *api.Container, netMode, ipcMode, pidMode string, restartCount int) (kubecontainer.ContainerID, error) {
 	start := time.Now()
 	defer func() {
 		metrics.ContainerManagerLatency.WithLabelValues("runContainerInPod").Observe(metrics.SinceInMicroseconds(start))
@@ -1523,7 +1507,7 @@ func (dm *DockerManager) runContainerInPod(pod *api.Pod, container *api.Containe
 	if pod.Spec.SecurityContext != nil && pod.Spec.SecurityContext.HostNetwork {
 		utsMode = "host"
 	}
-	id, err := dm.runContainer(pod, container, opts, ref, netMode, ipcMode, utsMode, pidMode, labels)
+	id, err := dm.runContainer(pod, container, opts, ref, netMode, ipcMode, utsMode, pidMode, restartCount)
 	if err != nil {
 		return kubecontainer.ContainerID{}, err
 	}
@@ -1536,8 +1520,9 @@ func (dm *DockerManager) runContainerInPod(pod *api.Pod, container *api.Containe
 	if container.Lifecycle != nil && container.Lifecycle.PostStart != nil {
 		handlerErr := dm.runner.Run(id, pod, container, container.Lifecycle.PostStart)
 		if handlerErr != nil {
-			dm.KillContainerInPod(id, container, pod)
-			return kubecontainer.ContainerID{}, fmt.Errorf("failed to call event handler: %v", handlerErr)
+			err := fmt.Errorf("failed to call event handler: %v", handlerErr)
+			dm.KillContainerInPod(id, container, pod, err.Error())
+			return kubecontainer.ContainerID{}, err
 		}
 	}
 
@@ -1660,8 +1645,8 @@ func (dm *DockerManager) createPodInfraContainer(pod *api.Pod) (kubetypes.Docker
 		return "", err
 	}
 
-	// There is no meaningful labels for infraContainer now, so just pass nil.
-	id, err := dm.runContainerInPod(pod, container, netNamespace, getIPCMode(pod), getPidMode(pod), nil)
+	// Currently we don't care about restart count of infra container, just set it to 0.
+	id, err := dm.runContainerInPod(pod, container, netNamespace, getIPCMode(pod), getPidMode(pod), 0)
 	if err != nil {
 		return "", err
 	}
@@ -1674,17 +1659,17 @@ func (dm *DockerManager) createPodInfraContainer(pod *api.Pod) (kubetypes.Docker
 // - startInfraContainer is true if new Infra Containers have to be started and old one (if running) killed.
 //   Additionally if it is true then containersToKeep have to be empty
 // - infraContainerId have to be set if and only if startInfraContainer is false. It stores dockerID of running Infra Container
-// - containersToStart keeps indices of Specs of containers that have to be started.
+// - containersToStart keeps indices of Specs of containers that have to be started and reasons why containers will be started.
 // - containersToKeep stores mapping from dockerIDs of running containers to indices of their Specs for containers that
 //   should be kept running. If startInfraContainer is false then it contains an entry for infraContainerId (mapped to -1).
 //   It shouldn't be the case where containersToStart is empty and containersToKeep contains only infraContainerId. In such case
 //   Infra Container should be killed, hence it's removed from this map.
 // - all running containers which are NOT contained in containersToKeep should be killed.
-type empty struct{}
 type PodContainerChangesSpec struct {
 	StartInfraContainer bool
+	InfraChanged        bool
 	InfraContainerId    kubetypes.DockerID
-	ContainersToStart   map[int]empty
+	ContainersToStart   map[int]string
 	ContainersToKeep    map[kubetypes.DockerID]int
 }
 
@@ -1698,7 +1683,7 @@ func (dm *DockerManager) computePodContainerChanges(pod *api.Pod, runningPod kub
 	uid := pod.UID
 	glog.V(4).Infof("Syncing Pod %+v, podFullName: %q, uid: %q", pod, podFullName, uid)
 
-	containersToStart := make(map[int]empty)
+	containersToStart := make(map[int]string)
 	containersToKeep := make(map[kubetypes.DockerID]int)
 
 	var err error
@@ -1734,8 +1719,9 @@ func (dm *DockerManager) computePodContainerChanges(pod *api.Pod, runningPod kub
 				// If we are here it means that the container is dead and should be restarted, or never existed and should
 				// be created. We may be inserting this ID again if the container has changed and it has
 				// RestartPolicy::Always, but it's not a big deal.
-				glog.V(3).Infof("Container %+v is dead, but RestartPolicy says that we should restart it.", container)
-				containersToStart[index] = empty{}
+				message := fmt.Sprintf("Container %+v is dead, but RestartPolicy says that we should restart it.", container)
+				glog.V(3).Info(message)
+				containersToStart[index] = message
 			}
 			continue
 		}
@@ -1750,8 +1736,9 @@ func (dm *DockerManager) computePodContainerChanges(pod *api.Pod, runningPod kub
 			// If RestartPolicy is Always or OnFailure we restart containers that were running before we
 			// killed them when restarting Infra Container.
 			if pod.Spec.RestartPolicy != api.RestartPolicyNever {
-				glog.V(1).Infof("Infra Container is being recreated. %q will be restarted.", container.Name)
-				containersToStart[index] = empty{}
+				message := fmt.Sprintf("Infra Container is being recreated. %q will be restarted.", container.Name)
+				glog.V(1).Info(message)
+				containersToStart[index] = message
 			}
 			continue
 		}
@@ -1760,8 +1747,9 @@ func (dm *DockerManager) computePodContainerChanges(pod *api.Pod, runningPod kub
 		// We will look for changes and check healthiness for the container.
 		containerChanged := hash != 0 && hash != expectedHash
 		if containerChanged {
-			glog.Infof("pod %q container %q hash changed (%d vs %d), it will be killed and re-created.", podFullName, container.Name, hash, expectedHash)
-			containersToStart[index] = empty{}
+			message := fmt.Sprintf("pod %q container %q hash changed (%d vs %d), it will be killed and re-created.", podFullName, container.Name, hash, expectedHash)
+			glog.Info(message)
+			containersToStart[index] = message
 			continue
 		}
 
@@ -1771,8 +1759,9 @@ func (dm *DockerManager) computePodContainerChanges(pod *api.Pod, runningPod kub
 			continue
 		}
 		if pod.Spec.RestartPolicy != api.RestartPolicyNever {
-			glog.Infof("pod %q container %q is unhealthy, it will be killed and re-created.", podFullName, container.Name)
-			containersToStart[index] = empty{}
+			message := fmt.Sprintf("pod %q container %q is unhealthy, it will be killed and re-created.", podFullName, container.Name)
+			glog.Info(message)
+			containersToStart[index] = message
 		}
 	}
 
@@ -1788,6 +1777,7 @@ func (dm *DockerManager) computePodContainerChanges(pod *api.Pod, runningPod kub
 
 	return PodContainerChangesSpec{
 		StartInfraContainer: createPodInfraContainer,
+		InfraChanged:        changed,
 		InfraContainerId:    podInfraContainerID,
 		ContainersToStart:   containersToStart,
 		ContainersToKeep:    containersToKeep,
@@ -1822,16 +1812,23 @@ func (dm *DockerManager) SyncPod(pod *api.Pod, runningPod kubecontainer.Pod, pod
 	}
 	glog.V(3).Infof("Got container changes for pod %q: %+v", podFullName, containerChanges)
 
+	if containerChanges.InfraChanged {
+		ref, err := api.GetReference(pod)
+		if err != nil {
+			glog.Errorf("Couldn't make a ref to pod %q: '%v'", podFullName, err)
+		}
+		dm.recorder.Eventf(ref, "InfraChanged", "Pod infrastructure changed, it will be killed and re-created.")
+	}
 	if containerChanges.StartInfraContainer || (len(containerChanges.ContainersToKeep) == 0 && len(containerChanges.ContainersToStart) == 0) {
 		if len(containerChanges.ContainersToKeep) == 0 && len(containerChanges.ContainersToStart) == 0 {
 			glog.V(4).Infof("Killing Infra Container for %q because all other containers are dead.", podFullName)
 		} else {
+
 			glog.V(4).Infof("Killing Infra Container for %q, will start new one", podFullName)
 		}
 
 		// Killing phase: if we want to start new infra container, or nothing is running kill everything (including infra container)
-		err = dm.KillPod(pod, runningPod)
-		if err != nil {
+		if err := dm.KillPod(pod, runningPod); err != nil {
 			return err
 		}
 	} else {
@@ -1842,15 +1839,17 @@ func (dm *DockerManager) SyncPod(pod *api.Pod, runningPod kubecontainer.Pod, pod
 				glog.V(3).Infof("Killing unwanted container %+v", container)
 				// attempt to find the appropriate container policy
 				var podContainer *api.Container
+				var killMessage string
 				for i, c := range pod.Spec.Containers {
 					if c.Name == container.Name {
 						podContainer = &pod.Spec.Containers[i]
+						killMessage = containerChanges.ContainersToStart[i]
 						break
 					}
 				}
-				err = dm.KillContainerInPod(container.ID, podContainer, pod)
-				if err != nil {
+				if err := dm.KillContainerInPod(container.ID, podContainer, pod, killMessage); err != nil {
 					glog.Errorf("Error killing container: %v", err)
+					return err
 				}
 			}
 		}
@@ -1869,11 +1868,12 @@ func (dm *DockerManager) SyncPod(pod *api.Pod, runningPod kubecontainer.Pod, pod
 		// Call the networking plugin
 		err = dm.networkPlugin.SetUpPod(pod.Namespace, pod.Name, podInfraContainerID)
 		if err != nil {
-			glog.Errorf("Failed to setup networking for pod %q using network plugins: %v; Skipping pod", podFullName, err)
+			message := fmt.Sprintf("Failed to setup networking for pod %q using network plugins: %v; Skipping pod", podFullName, err)
+			glog.Error(message)
 			// Delete infra container
 			if delErr := dm.KillContainerInPod(kubecontainer.ContainerID{
 				ID:   string(podInfraContainerID),
-				Type: "docker"}, nil, pod); delErr != nil {
+				Type: "docker"}, nil, pod, message); delErr != nil {
 				glog.Warningf("Clear infra container failed for pod %q: %v", podFullName, delErr)
 			}
 			return err
@@ -1896,6 +1896,7 @@ func (dm *DockerManager) SyncPod(pod *api.Pod, runningPod kubecontainer.Pod, pod
 		pod.Status.PodIP = dm.determineContainerIP(pod.Name, pod.Namespace, podInfraContainer)
 	}
 
+	containersStarted := 0
 	// Start everything
 	for idx := range containerChanges.ContainersToStart {
 		container := &pod.Spec.Containers[idx]
@@ -1922,17 +1923,16 @@ func (dm *DockerManager) SyncPod(pod *api.Pod, runningPod kubecontainer.Pod, pod
 			}
 		}
 
-		labels := map[string]string{}
 		containerStatuses := podStatus.ContainerStatuses
 		// podStatus is generated by GetPodStatus(). In GetPodStatus(), we make sure that ContainerStatuses
 		// contains statuses of all containers in pod.Spec.Containers.
 		// ContainerToStart is a subset of pod.Spec.Containers, we should always find a result here.
 		// For a new container, the RestartCount should be 0
-		labels[kubernetesContainerRestartCountLabel] = "0"
+		restartCount := 0
 		for _, containerStatus := range containerStatuses {
 			// If the container's terminate state is not empty, it exited before. Increment the restart count.
 			if containerStatus.Name == container.Name && (containerStatus.State.Terminated != nil || containerStatus.LastTerminationState.Terminated != nil) {
-				labels[kubernetesContainerRestartCountLabel] = strconv.Itoa(containerStatus.RestartCount + 1)
+				restartCount = containerStatus.RestartCount + 1
 				break
 			}
 		}
@@ -1943,18 +1943,22 @@ func (dm *DockerManager) SyncPod(pod *api.Pod, runningPod kubecontainer.Pod, pod
 		// and IPC namespace.  PID mode cannot point to another container right now.
 		// See createPodInfraContainer for infra container setup.
 		namespaceMode := fmt.Sprintf("container:%v", podInfraContainerID)
-		_, err = dm.runContainerInPod(pod, container, namespaceMode, namespaceMode, getPidMode(pod), labels)
+		_, err = dm.runContainerInPod(pod, container, namespaceMode, namespaceMode, getPidMode(pod), restartCount)
 		dm.updateReasonCache(pod, container, kubecontainer.ErrRunContainer.Error(), err)
 		if err != nil {
 			// TODO(bburns) : Perhaps blacklist a container after N failures?
 			glog.Errorf("Error running pod %q container %q: %v", kubecontainer.GetPodFullName(pod), container.Name, err)
 			continue
 		}
+		containersStarted++
 		// Successfully started the container; clear the entry in the failure
 		// reason cache.
 		dm.clearReasonCache(pod, container)
 	}
 
+	if containersStarted != len(containerChanges.ContainersToStart) {
+		return fmt.Errorf("not all containers have started: %d != %d", containersStarted, len(containerChanges.ContainersToStart))
+	}
 	return nil
 }
 
@@ -2045,7 +2049,7 @@ func (dm *DockerManager) doBackOff(pod *api.Pod, container *api.Container, podSt
 		stableName, _ := BuildDockerName(dockerName, container)
 		if backOff.IsInBackOffSince(stableName, ts.Time) {
 			if ref, err := kubecontainer.GenerateContainerRef(pod, container); err == nil {
-				dm.recorder.Eventf(ref, "Backoff", "Back-off restarting failed docker container")
+				dm.recorder.Eventf(ref, kubecontainer.BackOffStartContainer, "Back-off restarting failed docker container")
 			}
 			err := fmt.Errorf("Back-off %s restarting failed container=%s pod=%s", backOff.Get(stableName), container.Name, kubecontainer.GetPodFullName(pod))
 			dm.updateReasonCache(pod, container, kubecontainer.ErrCrashLoopBackOff.Error(), err)

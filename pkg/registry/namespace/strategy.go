@@ -82,6 +82,10 @@ func (namespaceStrategy) Validate(ctx api.Context, obj runtime.Object) fielderro
 	return validation.ValidateNamespace(namespace)
 }
 
+// Canonicalize normalizes the object after validation.
+func (namespaceStrategy) Canonicalize(obj runtime.Object) {
+}
+
 // AllowCreateOnUpdate is false for namespaces.
 func (namespaceStrategy) AllowCreateOnUpdate() bool {
 	return false
@@ -144,7 +148,7 @@ func MatchNamespace(label labels.Selector, field fields.Selector) generic.Matche
 
 // NamespaceToSelectableFields returns a label set that represents the object
 func NamespaceToSelectableFields(namespace *api.Namespace) labels.Set {
-	objectMetaFieldsSet := generic.ObjectMetaFieldsSet(namespace.ObjectMeta)
+	objectMetaFieldsSet := generic.ObjectMetaFieldsSet(namespace.ObjectMeta, false)
 	specificFieldsSet := fields.Set{
 		"status.phase": string(namespace.Status.Phase),
 		// This is a bug, but we need to support it for backward compatibility.

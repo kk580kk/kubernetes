@@ -72,6 +72,9 @@ type ImageSpec struct {
 // by a container runtime.
 // Thread safety is required from implementations of this interface.
 type Runtime interface {
+	// Type returns the type of the container runtime.
+	Type() string
+
 	// Version returns the version information of the container runtime.
 	Version() (Version, error)
 	// GetPods returns a list containers group by pods. The boolean parameter
@@ -358,7 +361,7 @@ func (p *Pod) IsEmpty() bool {
 func GetPodFullName(pod *api.Pod) string {
 	// Use underscore as the delimiter because it is not allowed in pod name
 	// (DNS subdomain format), while allowed in the container name format.
-	return fmt.Sprintf("%s_%s", pod.Name, pod.Namespace)
+	return pod.Name + "_" + pod.Namespace
 }
 
 // Build the pod full name from pod name and namespace.

@@ -54,7 +54,7 @@ $ kubectl run nginx --image=nginx --dry-run
 $ kubectl run nginx --image=nginx --overrides='{ "apiVersion": "v1", "spec": { ... } }'
 
 # Start a single instance of nginx and keep it in the foreground, don't restart it if it exits.
-$ kubectl run -i -tty nginx --image=nginx --restart=Never
+$ kubectl run -i --tty nginx --image=nginx --restart=Never
 
 # Start the nginx container using the default command, but use custom arguments (arg1 .. argN) for that command.
 $ kubectl run nginx --image=nginx -- <arg1> <arg2> ... <argN>
@@ -78,6 +78,7 @@ func NewCmdRun(f *cmdutil.Factory, cmdIn io.Reader, cmdOut, cmdErr io.Writer) *c
 	}
 	cmdutil.AddPrinterFlags(cmd)
 	addRunFlags(cmd)
+	cmdutil.AddApplyAnnotationFlags(cmd)
 	return cmd
 }
 
@@ -205,7 +206,7 @@ func Run(f *cmdutil.Factory, cmdIn io.Reader, cmdOut, cmdErr io.Writer, cmd *cob
 		if err != nil {
 			return err
 		}
-		return handleAttachPod(client, attachablePod, opts)
+		return handleAttachPod(f, client, attachablePod, opts)
 	}
 
 	outputFormat := cmdutil.GetFlagString(cmd, "output")
@@ -244,20 +245,40 @@ func waitForPodRunning(c *client.Client, pod *api.Pod, out io.Writer) (status ap
 	}
 }
 
-func handleAttachPod(c *client.Client, pod *api.Pod, opts *AttachOptions) error {
+func handleAttachPod(f *cmdutil.Factory, c *client.Client, pod *api.Pod, opts *AttachOptions) error {
 	status, err := waitForPodRunning(c, pod, opts.Out)
 	if err != nil {
 		return err
 	}
 	if status == api.PodSucceeded || status == api.PodFailed {
-		return handleLog(c, pod.Namespace, pod.Name, &api.PodLogOptions{Container: opts.GetContainerName(pod)}, opts.Out)
+		req, err := f.LogsForObject(pod, &api.PodLogOptions{Container: opts.GetContainerName(pod)})
+		if err != nil {
+			return err
+		}
+		readCloser, err := req.Stream()
+		if err != nil {
+			return err
+		}
+		defer readCloser.Close()
+		_, err = io.Copy(opts.Out, readCloser)
+		return err
 	}
 	opts.Client = c
 	opts.PodName = pod.Name
 	opts.Namespace = pod.Namespace
 	if err := opts.Run(); err != nil {
 		fmt.Fprintf(opts.Out, "Error attaching, falling back to logs: %v\n", err)
-		return handleLog(c, pod.Namespace, pod.Name, &api.PodLogOptions{Container: opts.GetContainerName(pod)}, opts.Out)
+		req, err := f.LogsForObject(pod, &api.PodLogOptions{Container: opts.GetContainerName(pod)})
+		if err != nil {
+			return err
+		}
+		readCloser, err := req.Stream()
+		if err != nil {
+			return err
+		}
+		defer readCloser.Close()
+		_, err = io.Copy(opts.Out, readCloser)
+		return err
 	}
 	return nil
 }
@@ -371,18 +392,11 @@ func createGeneratedObject(f *cmdutil.Factory, cmd *cobra.Command, generator kub
 			return nil, "", nil, nil, err
 		}
 
-		// Serialize the configuration into an annotation.
-		if err := kubectl.UpdateApplyAnnotation(info); err != nil {
+		if err := kubectl.CreateOrUpdateAnnotation(cmdutil.GetFlagBool(cmd, cmdutil.ApplyAnnotationsFlag), info); err != nil {
 			return nil, "", nil, nil, err
 		}
 
-		// Serialize the object with the annotation applied.
-		data, err := mapping.Codec.Encode(info.Object)
-		if err != nil {
-			return nil, "", nil, nil, err
-		}
-
-		obj, err = resource.NewHelper(client, mapping).Create(namespace, false, data)
+		obj, err = resource.NewHelper(client, mapping).Create(namespace, false, info.Object)
 		if err != nil {
 			return nil, "", nil, nil, err
 		}

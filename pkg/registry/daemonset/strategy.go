@@ -82,6 +82,10 @@ func (daemonSetStrategy) Validate(ctx api.Context, obj runtime.Object) fielderro
 	return validation.ValidateDaemonSet(daemonSet)
 }
 
+// Canonicalize normalizes the object after validation.
+func (daemonSetStrategy) Canonicalize(obj runtime.Object) {
+}
+
 // AllowCreateOnUpdate is false for daemon set; this means a POST is
 // needed to create one
 func (daemonSetStrategy) AllowCreateOnUpdate() bool {
@@ -91,7 +95,7 @@ func (daemonSetStrategy) AllowCreateOnUpdate() bool {
 // ValidateUpdate is the default update validation for an end user.
 func (daemonSetStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
 	validationErrorList := validation.ValidateDaemonSet(obj.(*extensions.DaemonSet))
-	updateErrorList := validation.ValidateDaemonSetUpdate(old.(*extensions.DaemonSet), obj.(*extensions.DaemonSet))
+	updateErrorList := validation.ValidateDaemonSetUpdate(obj.(*extensions.DaemonSet), old.(*extensions.DaemonSet))
 	return append(validationErrorList, updateErrorList...)
 }
 
@@ -102,7 +106,7 @@ func (daemonSetStrategy) AllowUnconditionalUpdate() bool {
 
 // DaemonSetToSelectableFields returns a field set that represents the object.
 func DaemonSetToSelectableFields(daemon *extensions.DaemonSet) fields.Set {
-	return generic.ObjectMetaFieldsSet(daemon.ObjectMeta)
+	return generic.ObjectMetaFieldsSet(daemon.ObjectMeta, true)
 }
 
 // MatchSetDaemon is the filter used by the generic etcd backend to route

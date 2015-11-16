@@ -36,6 +36,8 @@ func TestValidateHorizontalPodAutoscaler(t *testing.T) {
 			},
 			Spec: extensions.HorizontalPodAutoscalerSpec{
 				ScaleRef: extensions.SubresourceReference{
+					Kind:        "ReplicationController",
+					Name:        "myrc",
 					Subresource: "scale",
 				},
 				MinReplicas:    newInt(1),
@@ -50,6 +52,8 @@ func TestValidateHorizontalPodAutoscaler(t *testing.T) {
 			},
 			Spec: extensions.HorizontalPodAutoscalerSpec{
 				ScaleRef: extensions.SubresourceReference{
+					Kind:        "ReplicationController",
+					Name:        "myrc",
 					Subresource: "scale",
 				},
 				MinReplicas: newInt(1),
@@ -67,6 +71,90 @@ func TestValidateHorizontalPodAutoscaler(t *testing.T) {
 		horizontalPodAutoscaler extensions.HorizontalPodAutoscaler
 		msg                     string
 	}{
+		{
+			horizontalPodAutoscaler: extensions.HorizontalPodAutoscaler{
+				ObjectMeta: api.ObjectMeta{Name: "myautoscaler", Namespace: api.NamespaceDefault},
+				Spec: extensions.HorizontalPodAutoscalerSpec{
+					ScaleRef:       extensions.SubresourceReference{Name: "myrc", Subresource: "scale"},
+					MinReplicas:    newInt(1),
+					MaxReplicas:    5,
+					CPUUtilization: &extensions.CPUTargetUtilization{TargetPercentage: 70},
+				},
+			},
+			msg: "scaleRef.kind: required",
+		},
+		{
+			horizontalPodAutoscaler: extensions.HorizontalPodAutoscaler{
+				ObjectMeta: api.ObjectMeta{Name: "myautoscaler", Namespace: api.NamespaceDefault},
+				Spec: extensions.HorizontalPodAutoscalerSpec{
+					ScaleRef:       extensions.SubresourceReference{Kind: "..", Name: "myrc", Subresource: "scale"},
+					MinReplicas:    newInt(1),
+					MaxReplicas:    5,
+					CPUUtilization: &extensions.CPUTargetUtilization{TargetPercentage: 70},
+				},
+			},
+			msg: "scaleRef.kind: invalid",
+		},
+		{
+			horizontalPodAutoscaler: extensions.HorizontalPodAutoscaler{
+				ObjectMeta: api.ObjectMeta{Name: "myautoscaler", Namespace: api.NamespaceDefault},
+				Spec: extensions.HorizontalPodAutoscalerSpec{
+					ScaleRef:       extensions.SubresourceReference{Kind: "ReplicationController", Subresource: "scale"},
+					MinReplicas:    newInt(1),
+					MaxReplicas:    5,
+					CPUUtilization: &extensions.CPUTargetUtilization{TargetPercentage: 70},
+				},
+			},
+			msg: "scaleRef.name: required",
+		},
+		{
+			horizontalPodAutoscaler: extensions.HorizontalPodAutoscaler{
+				ObjectMeta: api.ObjectMeta{Name: "myautoscaler", Namespace: api.NamespaceDefault},
+				Spec: extensions.HorizontalPodAutoscalerSpec{
+					ScaleRef:       extensions.SubresourceReference{Kind: "ReplicationController", Name: "..", Subresource: "scale"},
+					MinReplicas:    newInt(1),
+					MaxReplicas:    5,
+					CPUUtilization: &extensions.CPUTargetUtilization{TargetPercentage: 70},
+				},
+			},
+			msg: "scaleRef.name: invalid",
+		},
+		{
+			horizontalPodAutoscaler: extensions.HorizontalPodAutoscaler{
+				ObjectMeta: api.ObjectMeta{Name: "myautoscaler", Namespace: api.NamespaceDefault},
+				Spec: extensions.HorizontalPodAutoscalerSpec{
+					ScaleRef:       extensions.SubresourceReference{Kind: "ReplicationController", Name: "myrc", Subresource: ""},
+					MinReplicas:    newInt(1),
+					MaxReplicas:    5,
+					CPUUtilization: &extensions.CPUTargetUtilization{TargetPercentage: 70},
+				},
+			},
+			msg: "scaleRef.subresource: required",
+		},
+		{
+			horizontalPodAutoscaler: extensions.HorizontalPodAutoscaler{
+				ObjectMeta: api.ObjectMeta{Name: "myautoscaler", Namespace: api.NamespaceDefault},
+				Spec: extensions.HorizontalPodAutoscalerSpec{
+					ScaleRef:       extensions.SubresourceReference{Kind: "ReplicationController", Name: "myrc", Subresource: ".."},
+					MinReplicas:    newInt(1),
+					MaxReplicas:    5,
+					CPUUtilization: &extensions.CPUTargetUtilization{TargetPercentage: 70},
+				},
+			},
+			msg: "scaleRef.subresource: invalid",
+		},
+		{
+			horizontalPodAutoscaler: extensions.HorizontalPodAutoscaler{
+				ObjectMeta: api.ObjectMeta{Name: "myautoscaler", Namespace: api.NamespaceDefault},
+				Spec: extensions.HorizontalPodAutoscalerSpec{
+					ScaleRef:       extensions.SubresourceReference{Kind: "ReplicationController", Name: "myrc", Subresource: "randomsubresource"},
+					MinReplicas:    newInt(1),
+					MaxReplicas:    5,
+					CPUUtilization: &extensions.CPUTargetUtilization{TargetPercentage: 70},
+				},
+			},
+			msg: "scaleRef.subresource: unsupported",
+		},
 		{
 			horizontalPodAutoscaler: extensions.HorizontalPodAutoscaler{
 				ObjectMeta: api.ObjectMeta{
@@ -329,7 +417,7 @@ func TestValidateDaemonSetUpdate(t *testing.T) {
 	for _, successCase := range successCases {
 		successCase.old.ObjectMeta.ResourceVersion = "1"
 		successCase.update.ObjectMeta.ResourceVersion = "1"
-		if errs := ValidateDaemonSetUpdate(&successCase.old, &successCase.update); len(errs) != 0 {
+		if errs := ValidateDaemonSetUpdate(&successCase.update, &successCase.old); len(errs) != 0 {
 			t.Errorf("expected success: %v", errs)
 		}
 	}
@@ -416,7 +504,7 @@ func TestValidateDaemonSetUpdate(t *testing.T) {
 		},
 	}
 	for testName, errorCase := range errorCases {
-		if errs := ValidateDaemonSetUpdate(&errorCase.old, &errorCase.update); len(errs) == 0 {
+		if errs := ValidateDaemonSetUpdate(&errorCase.update, &errorCase.old); len(errs) == 0 {
 			t.Errorf("expected failure: %s", testName)
 		}
 	}
@@ -613,7 +701,7 @@ func validDeployment() *extensions.Deployment {
 			Selector: map[string]string{
 				"name": "abc",
 			},
-			Template: &api.PodTemplateSpec{
+			Template: api.PodTemplateSpec{
 				ObjectMeta: api.ObjectMeta{
 					Name:      "abc",
 					Namespace: api.NamespaceDefault,

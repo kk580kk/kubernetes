@@ -18,7 +18,6 @@ package unversioned
 
 import (
 	"bytes"
-	"encoding/base64"
 	"errors"
 	"io"
 	"io/ioutil"
@@ -141,6 +140,25 @@ func TestRequestSetTwiceError(t *testing.T) {
 	}
 	if (&Request{}).SubResource("bar").SubResource("baz").err == nil {
 		t.Errorf("setting subresource twice should result in error")
+	}
+}
+
+func TestInvalidSegments(t *testing.T) {
+	invalidSegments := []string{".", "..", "test/segment", "test%2bsegment"}
+	setters := map[string]func(string, *Request){
+		"namespace":   func(s string, r *Request) { r.Namespace(s) },
+		"resource":    func(s string, r *Request) { r.Resource(s) },
+		"name":        func(s string, r *Request) { r.Name(s) },
+		"subresource": func(s string, r *Request) { r.SubResource(s) },
+	}
+	for _, invalidSegment := range invalidSegments {
+		for setterName, setter := range setters {
+			r := &Request{}
+			setter(invalidSegment, r)
+			if r.err == nil {
+				t.Errorf("%s: %s: expected error, got none", setterName, invalidSegment)
+			}
+		}
 	}
 }
 
@@ -745,6 +763,38 @@ func TestCheckRetryClosesBody(t *testing.T) {
 	}
 }
 
+func TestCheckRetryHandles429And5xx(t *testing.T) {
+	count := 0
+	ch := make(chan struct{})
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		t.Logf("attempt %d", count)
+		if count >= 4 {
+			w.WriteHeader(http.StatusOK)
+			close(ch)
+			return
+		}
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader([]int{apierrors.StatusTooManyRequests, 500, 501, 504}[count])
+		count++
+	}))
+	defer testServer.Close()
+
+	c := NewOrDie(&Config{Host: testServer.URL, Version: testapi.Default.Version(), Username: "user", Password: "pass"})
+	_, err := c.Verb("POST").
+		Prefix("foo", "bar").
+		Suffix("baz").
+		Timeout(time.Second).
+		Body([]byte(strings.Repeat("abcd", 1000))).
+		DoRaw()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v %#v", err, err)
+	}
+	<-ch
+	if count != 4 {
+		t.Errorf("unexpected retries: %d", count)
+	}
+}
+
 func BenchmarkCheckRetryClosesBody(t *testing.B) {
 	count := 0
 	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -771,6 +821,7 @@ func BenchmarkCheckRetryClosesBody(t *testing.B) {
 		}
 	}
 }
+
 func TestDoRequestNewWayReader(t *testing.T) {
 	reqObj := &api.Pod{ObjectMeta: api.ObjectMeta{Name: "foo"}}
 	reqBodyExpected, _ := testapi.Default.Codec().Encode(reqObj)
@@ -976,43 +1027,6 @@ func TestVerbs(t *testing.T) {
 	}
 }
 
-func TestUnversionedPath(t *testing.T) {
-	tt := []struct {
-		host         string
-		prefix       string
-		unversioned  string
-		expectedPath string
-	}{
-		{"", "", "", "/api"},
-		{"", "", "versions", "/api/versions"},
-		{"", "/", "", "/"},
-		{"", "/versions", "", "/versions"},
-		{"", "/api", "", "/api"},
-		{"", "/api/vfake", "", "/api/vfake"},
-		{"", "/api/vfake", "v1beta100", "/api/vfake/v1beta100"},
-		{"", "/api", "/versions", "/api/versions"},
-		{"", "/api", "versions", "/api/versions"},
-		{"", "/a/api", "", "/a/api"},
-		{"", "/a/api", "/versions", "/a/api/versions"},
-		{"", "/a/api", "/versions/d/e", "/a/api/versions/d/e"},
-		{"", "/a/api/vfake", "/versions/d/e", "/a/api/vfake/versions/d/e"},
-	}
-	for i, tc := range tt {
-		c := NewOrDie(&Config{Host: tc.host, Prefix: tc.prefix})
-		r := c.Post().Prefix("/alpha").UnversionedPath(tc.unversioned)
-		if r.path != tc.expectedPath {
-			t.Errorf("test case %d failed: unexpected path: %s, expected %s", i+1, r.path, tc.expectedPath)
-		}
-	}
-	for i, tc := range tt {
-		c := NewOrDie(&Config{Host: tc.host, Prefix: tc.prefix, Version: "v1"})
-		r := c.Post().Prefix("/alpha").UnversionedPath(tc.unversioned)
-		if r.path != tc.expectedPath {
-			t.Errorf("test case %d failed: unexpected path: %s, expected %s", i+1, r.path, tc.expectedPath)
-		}
-	}
-}
-
 func TestAbsPath(t *testing.T) {
 	expectedPath := "/bar/foo"
 	c := NewOrDie(&Config{})
@@ -1111,36 +1125,14 @@ func TestBody(t *testing.T) {
 	}
 }
 
-func authFromReq(r *http.Request) (*Config, bool) {
-	auth, ok := r.Header["Authorization"]
-	if !ok {
-		return nil, false
-	}
-
-	encoded := strings.Split(auth[0], " ")
-	if len(encoded) != 2 || encoded[0] != "Basic" {
-		return nil, false
-	}
-
-	decoded, err := base64.StdEncoding.DecodeString(encoded[1])
-	if err != nil {
-		return nil, false
-	}
-	parts := strings.Split(string(decoded), ":")
-	if len(parts) != 2 {
-		return nil, false
-	}
-	return &Config{Username: parts[0], Password: parts[1]}, true
-}
-
 // checkAuth sets errors if the auth found in r doesn't match the expectation.
 // TODO: Move to util, test in more places.
-func checkAuth(t *testing.T, expect *Config, r *http.Request) {
-	foundAuth, found := authFromReq(r)
+func checkAuth(t *testing.T, expectedUser, expectedPass string, r *http.Request) {
+	user, pass, found := r.BasicAuth()
 	if !found {
 		t.Errorf("no auth found")
-	} else if e, a := expect, foundAuth; !api.Semantic.DeepDerivative(e, a) {
-		t.Fatalf("Wrong basic auth: wanted %#v, got %#v", e, a)
+	} else if user != expectedUser || pass != expectedPass {
+		t.Fatalf("Wrong basic auth: wanted %s:%s, got %s:%s", expectedUser, expectedPass, user, pass)
 	}
 }
 
@@ -1154,9 +1146,8 @@ func TestWatch(t *testing.T) {
 		{watch.Deleted, &api.Pod{ObjectMeta: api.ObjectMeta{Name: "last"}}},
 	}
 
-	auth := &Config{Username: "user", Password: "pass"}
 	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		checkAuth(t, auth, r)
+		checkAuth(t, "user", "pass", r)
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			panic("need flusher!")
@@ -1210,11 +1201,10 @@ func TestWatch(t *testing.T) {
 }
 
 func TestStream(t *testing.T) {
-	auth := &Config{Username: "user", Password: "pass"}
 	expectedBody := "expected body"
 
 	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		checkAuth(t, auth, r)
+		checkAuth(t, "user", "pass", r)
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			panic("need flusher!")

@@ -56,6 +56,10 @@ func (deploymentStrategy) Validate(ctx api.Context, obj runtime.Object) errs.Val
 	return validation.ValidateDeployment(deployment)
 }
 
+// Canonicalize normalizes the object after validation.
+func (deploymentStrategy) Canonicalize(obj runtime.Object) {
+}
+
 // AllowCreateOnUpdate is false for deployments.
 func (deploymentStrategy) AllowCreateOnUpdate() bool {
 	return false
@@ -70,7 +74,7 @@ func (deploymentStrategy) PrepareForUpdate(obj, old runtime.Object) {
 
 // ValidateUpdate is the default update validation for an end user.
 func (deploymentStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) errs.ValidationErrorList {
-	return validation.ValidateDeploymentUpdate(old.(*extensions.Deployment), obj.(*extensions.Deployment))
+	return validation.ValidateDeploymentUpdate(obj.(*extensions.Deployment), old.(*extensions.Deployment))
 }
 
 func (deploymentStrategy) AllowUnconditionalUpdate() bool {
@@ -92,12 +96,12 @@ func (deploymentStatusStrategy) PrepareForUpdate(obj, old runtime.Object) {
 
 // ValidateUpdate is the default update validation for an end user updating status
 func (deploymentStatusStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) errs.ValidationErrorList {
-	return validation.ValidateDeploymentUpdate(old.(*extensions.Deployment), obj.(*extensions.Deployment))
+	return validation.ValidateDeploymentUpdate(obj.(*extensions.Deployment), old.(*extensions.Deployment))
 }
 
 // DeploymentToSelectableFields returns a field set that represents the object.
 func DeploymentToSelectableFields(deployment *extensions.Deployment) fields.Set {
-	return generic.ObjectMetaFieldsSet(deployment.ObjectMeta)
+	return generic.ObjectMetaFieldsSet(deployment.ObjectMeta, true)
 }
 
 // MatchDeployment is the filter used by the generic etcd backend to route

@@ -23,6 +23,7 @@ import (
 	"k8s.io/kubernetes/pkg/apis/extensions"
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
+	"k8s.io/kubernetes/pkg/registry/generic"
 	"k8s.io/kubernetes/pkg/registry/registrytest"
 	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/tools"
@@ -31,7 +32,7 @@ import (
 
 func newStorage(t *testing.T) (*REST, *StatusREST, *tools.FakeEtcdClient) {
 	etcdStorage, fakeClient := registrytest.NewEtcdStorage(t, "extensions")
-	ingressStorage, statusStorage := NewREST(etcdStorage)
+	ingressStorage, statusStorage := NewREST(etcdStorage, generic.UndecoratedStorage)
 	return ingressStorage, statusStorage, fakeClient
 }
 

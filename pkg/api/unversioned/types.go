@@ -215,6 +215,12 @@ const (
 	// Status code 500
 	StatusReasonInternalError = "InternalError"
 
+	// StatusReasonExpired indicates that the request is invalid because the content you are requesting
+	// has expired and is no longer available. It is typically associated with watches that can't be
+	// serviced.
+	// Status code 410 (gone)
+	StatusReasonExpired = "Expired"
+
 	// StatusReasonServiceUnavailable means that the request itself was valid,
 	// but the requested service is unavailable at this time.
 	// Retrying the request after some time might succeed.
@@ -270,11 +276,16 @@ const (
 	CauseTypeUnexpectedServerResponse CauseType = "UnexpectedServerResponse"
 )
 
-func (*Status) IsAnAPIObject() {}
+func (*Status) IsAnAPIObject()          {}
+func (*APIVersions) IsAnAPIObject()     {}
+func (*APIGroupList) IsAnAPIObject()    {}
+func (*APIGroup) IsAnAPIObject()        {}
+func (*APIResourceList) IsAnAPIObject() {}
 
 // APIVersions lists the versions that are available, to allow clients to
 // discover the API at /api, which is the root path of the legacy v1 API.
 type APIVersions struct {
+	TypeMeta `json:",inline"`
 	// versions are the api versions that are available.
 	Versions []string `json:"versions"`
 }
@@ -282,6 +293,7 @@ type APIVersions struct {
 // APIGroupList is a list of APIGroup, to allow clients to discover the API at
 // /apis.
 type APIGroupList struct {
+	TypeMeta `json:",inline"`
 	// groups is a list of APIGroup.
 	Groups []APIGroup `json:"groups"`
 }
@@ -289,18 +301,19 @@ type APIGroupList struct {
 // APIGroup contains the name, the supported versions, and the preferred version
 // of a group.
 type APIGroup struct {
+	TypeMeta `json:",inline"`
 	// name is the name of the group.
 	Name string `json:"name"`
 	// versions are the versions supported in this group.
-	Versions []GroupVersion `json:"versions"`
+	Versions []GroupVersionForDiscovery `json:"versions"`
 	// preferredVersion is the version preferred by the API server, which
 	// probably is the storage version.
-	PreferredVersion GroupVersion `json:"preferredVersion,omitempty"`
+	PreferredVersion GroupVersionForDiscovery `json:"preferredVersion,omitempty"`
 }
 
 // GroupVersion contains the "group/version" and "version" string of a version.
 // It is made a struct to keep extensiblity.
-type GroupVersion struct {
+type GroupVersionForDiscovery struct {
 	// groupVersion specifies the API group and version in the form "group/version"
 	GroupVersion string `json:"groupVersion"`
 	// version specifies the version in the form of "version". This is to save
@@ -320,6 +333,7 @@ type APIResource struct {
 // resources supported in a specific group and version, and if the resource
 // is namespaced.
 type APIResourceList struct {
+	TypeMeta `json:",inline"`
 	// groupVersion is the group and version this APIResourceList is for.
 	GroupVersion string `json:"groupVersion"`
 	// resources contains the name of the resources and if they are namespaced.

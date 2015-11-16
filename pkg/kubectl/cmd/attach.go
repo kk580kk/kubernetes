@@ -31,6 +31,7 @@ import (
 	client "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/client/unversioned/remotecommand"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
+	utilerrors "k8s.io/kubernetes/pkg/util/errors"
 )
 
 const (
@@ -137,16 +138,17 @@ func (p *AttachOptions) Complete(f *cmdutil.Factory, cmd *cobra.Command, argsIn 
 
 // Validate checks that the provided attach options are specified.
 func (p *AttachOptions) Validate() error {
+	allErrs := []error{}
 	if len(p.PodName) == 0 {
-		return fmt.Errorf("pod name must be specified")
+		allErrs = append(allErrs, fmt.Errorf("pod name must be specified"))
 	}
 	if p.Out == nil || p.Err == nil {
-		return fmt.Errorf("both output and error output must be provided")
+		allErrs = append(allErrs, fmt.Errorf("both output and error output must be provided"))
 	}
 	if p.Attach == nil || p.Client == nil || p.Config == nil {
-		return fmt.Errorf("client, client config, and attach must be provided")
+		allErrs = append(allErrs, fmt.Errorf("client, client config, and attach must be provided"))
 	}
-	return nil
+	return utilerrors.NewAggregate(allErrs)
 }
 
 // Run executes a validated remote execution against a pod.
@@ -160,9 +162,16 @@ func (p *AttachOptions) Run() error {
 		return fmt.Errorf("pod %s is not running and cannot be attached to; current phase is %s", p.PodName, pod.Status.Phase)
 	}
 
-	// TODO: refactor with terminal helpers from the edit utility once that is merged
 	var stdin io.Reader
 	tty := p.TTY
+
+	containerToAttach := p.GetContainer(pod)
+	if tty && !containerToAttach.TTY {
+		tty = false
+		fmt.Fprintf(p.Err, "Unable to use a TTY - container %s doesn't allocate one\n", containerToAttach.Name)
+	}
+
+	// TODO: refactor with terminal helpers from the edit utility once that is merged
 	if p.Stdin {
 		stdin = p.In
 		if tty {
@@ -173,6 +182,7 @@ func (p *AttachOptions) Run() error {
 					if err != nil {
 						glog.Fatal(err)
 					}
+					fmt.Fprintln(p.Out, "\nHit enter for command prompt")
 					// this handles a clean exit, where the command finished
 					defer term.RestoreTerminal(inFd, oldState)
 
@@ -204,7 +214,7 @@ func (p *AttachOptions) Run() error {
 		Namespace(pod.Namespace).
 		SubResource("attach")
 	req.VersionedParams(&api.PodAttachOptions{
-		Container: p.GetContainerName(pod),
+		Container: containerToAttach.Name,
 		Stdin:     stdin != nil,
 		Stdout:    p.Out != nil,
 		Stderr:    p.Err != nil,
@@ -214,12 +224,21 @@ func (p *AttachOptions) Run() error {
 	return p.Attach.Attach("POST", req.URL(), p.Config, stdin, p.Out, p.Err, tty)
 }
 
-// GetContainerName returns the name of the container to attach to, with a fallback.
-func (p *AttachOptions) GetContainerName(pod *api.Pod) string {
+// GetContainer returns the container to attach to, with a fallback.
+func (p *AttachOptions) GetContainer(pod *api.Pod) api.Container {
 	if len(p.ContainerName) > 0 {
-		return p.ContainerName
+		for _, container := range pod.Spec.Containers {
+			if container.Name == p.ContainerName {
+				return container
+			}
+		}
 	}
 
 	glog.V(4).Infof("defaulting container name to %s", pod.Spec.Containers[0].Name)
-	return pod.Spec.Containers[0].Name
+	return pod.Spec.Containers[0]
+}
+
+// GetContainerName returns the name of the container to attach to, with a fallback.
+func (p *AttachOptions) GetContainerName(pod *api.Pod) string {
+	return p.GetContainer(pod).Name
 }

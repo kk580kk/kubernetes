@@ -30,7 +30,7 @@ KUBE_APISERVER_REQUEST_TIMEOUT=300
 PREEMPTIBLE_MINION=${PREEMPTIBLE_MINION:-false}
 
 OS_DISTRIBUTION=${KUBE_OS_DISTRIBUTION:-debian}
-MASTER_IMAGE=${KUBE_GCE_MASTER_IMAGE:-container-vm-v20150806}
+MASTER_IMAGE=${KUBE_GCE_MASTER_IMAGE:-container-vm-v20151103}
 MASTER_IMAGE_PROJECT=${KUBE_GCE_MASTER_PROJECT:-google-containers}
 MINION_IMAGE=${KUBE_GCE_MINION_IMAGE:-"${MASTER_IMAGE}"}
 MINION_IMAGE_PROJECT=${KUBE_GCE_MINION_PROJECT:-"${MASTER_IMAGE_PROJECT}"}
@@ -46,12 +46,19 @@ CLUSTER_IP_RANGE="${CLUSTER_IP_RANGE:-10.245.0.0/16}"
 MASTER_IP_RANGE="${MASTER_IP_RANGE:-10.246.0.0/24}"
 MINION_SCOPES="${MINION_SCOPES:-compute-rw,monitoring,logging-write,storage-ro}"
 RUNTIME_CONFIG="${KUBE_RUNTIME_CONFIG:-}"
-ENABLE_EXPERIMENTAL_API="${KUBE_ENABLE_EXPERIMENTAL_API:-true}"
 TERMINATED_POD_GC_THRESHOLD=${TERMINATED_POD_GC_THRESHOLD:-100}
+
+# Optional: enable v1beta1 related features
+ENABLE_DEPLOYMENTS="${KUBE_ENABLE_DEPLOYMENTS:-true}"
+ENABLE_DAEMONSETS="${KUBE_ENABLE_DAEMONSETS:-true}"
 
 # Increase the sleep interval value if concerned about API rate limits. 3, in seconds, is the default.
 POLL_SLEEP_INTERVAL=3
 SERVICE_CLUSTER_IP_RANGE="10.0.0.0/16"  # formerly PORTAL_NET
+
+# Optional: Deploy a L7 loadbalancer controller to fulfill Ingress requests:
+#   glbc           - CE L7 Load Balancer Controller
+ENABLE_L7_LOADBALANCING="${KUBE_ENABLE_L7_LOADBALANCING:-glbc}"
 
 # Optional: Cluster monitoring to setup as part of the cluster bring up:
 #   none           - No cluster monitoring setup
@@ -106,18 +113,6 @@ if [[ "${ENABLE_NODE_AUTOSCALER}" == "true" ]]; then
   TARGET_NODE_UTILIZATION="${KUBE_TARGET_NODE_UTILIZATION:-0.7}"
 fi
 
-# Optional: Enable deployment experimental feature, not ready for production use.
-ENABLE_DEPLOYMENTS="${KUBE_ENABLE_DEPLOYMENTS:-false}"
-if [[ "${ENABLE_DEPLOYMENTS}" == "true" ]]; then
-  ENABLE_EXPERIMENTAL_API=true
-fi
-
-# Optional: Enable daemonset experimental feature, not ready for production use.
-ENABLE_DAEMONSETS="${KUBE_ENABLE_DAEMONSETS:-true}"
-if [[ "${ENABLE_DAEMONSETS}" == "true" ]]; then
-  ENABLE_EXPERIMENTAL_API=true
-fi
-
 ADMISSION_CONTROL="${KUBE_ADMISSION_CONTROL:-NamespaceLifecycle,LimitRanger,SecurityContextDeny,ServiceAccount,ResourceQuota}"
 
 # Optional: if set to true kube-up will automatically check for existing resources and clean them up.
@@ -134,3 +129,6 @@ NETWORK_PROVIDER="${NETWORK_PROVIDER:-none}" # opencontrail
 OPENCONTRAIL_TAG="${OPENCONTRAIL_TAG:-R2.20}"
 OPENCONTRAIL_KUBERNETES_TAG="${OPENCONTRAIL_KUBERNETES_TAG:-master}"
 OPENCONTRAIL_PUBLIC_SUBNET="${OPENCONTRAIL_PUBLIC_SUBNET:-10.1.0.0/16}"
+
+# Optional: if set to true, kube-up will configure the cluster to run e2e tests.
+E2E_STORAGE_TEST_ENVIRONMENT=${KUBE_E2E_STORAGE_TEST_ENVIRONMENT:-false}

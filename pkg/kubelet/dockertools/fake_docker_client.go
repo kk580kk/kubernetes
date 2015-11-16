@@ -66,6 +66,42 @@ func (f *FakeDockerClient) ClearCalls() {
 	f.Removed = []string{}
 }
 
+func (f *FakeDockerClient) SetFakeContainers(containers []*docker.Container) {
+	f.Lock()
+	defer f.Unlock()
+	// Reset the lists and the map.
+	f.ContainerMap = map[string]*docker.Container{}
+	f.ContainerList = []docker.APIContainers{}
+	f.ExitedContainerList = []docker.APIContainers{}
+
+	for i := range containers {
+		c := containers[i]
+		if c.Config == nil {
+			c.Config = &docker.Config{}
+		}
+		if c.HostConfig == nil {
+			c.HostConfig = &docker.HostConfig{}
+		}
+		f.ContainerMap[c.ID] = c
+		apiContainer := docker.APIContainers{
+			Names: []string{c.Name},
+			ID:    c.ID,
+		}
+		if c.State.Running {
+			f.ContainerList = append(f.ContainerList, apiContainer)
+		} else {
+			f.ExitedContainerList = append(f.ExitedContainerList, apiContainer)
+		}
+	}
+}
+
+func (f *FakeDockerClient) SetFakeRunningContainers(containers []*docker.Container) {
+	for _, c := range containers {
+		c.State.Running = true
+	}
+	f.SetFakeContainers(containers)
+}
+
 func (f *FakeDockerClient) AssertCalls(calls []string) (err error) {
 	f.Lock()
 	defer f.Unlock()
@@ -146,13 +182,14 @@ func (f *FakeDockerClient) ListContainers(options docker.ListContainersOptions) 
 	defer f.Unlock()
 	f.called = append(f.called, "list")
 	err := f.popError("list")
+	containerList := append([]docker.APIContainers{}, f.ContainerList...)
 	if options.All {
 		// Althought the container is not sorted, but the container with the same name should be in order,
 		// that is enough for us now.
 		// TODO (random-liu) Is a fully sorted array needed?
-		return append(f.ContainerList, f.ExitedContainerList...), err
+		containerList = append(containerList, f.ExitedContainerList...)
 	}
-	return append([]docker.APIContainers{}, f.ContainerList...), err
+	return containerList, err
 }
 
 // InspectContainer is a test-spy implementation of DockerInterface.InspectContainer.

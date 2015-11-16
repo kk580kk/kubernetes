@@ -21,6 +21,8 @@ function build-kube-env {
   local master=$1
   local file=$2
 
+  build-runtime-config
+
   rm -f ${file}
   # TODO(dawnchen): master node is still running with debian image
   if [[ "${master}" == "true" ]]; then
@@ -56,7 +58,6 @@ KUBELET_TOKEN: $(yaml-quote ${KUBELET_TOKEN:-})
 KUBE_PROXY_TOKEN: $(yaml-quote ${KUBE_PROXY_TOKEN:-})
 ADMISSION_CONTROL: $(yaml-quote ${ADMISSION_CONTROL:-})
 MASTER_IP_RANGE: $(yaml-quote ${MASTER_IP_RANGE})
-ENABLE_EXPERIMENTAL_API: $(yaml-quote ${ENABLE_EXPERIMENTAL_API})
 RUNTIME_CONFIG: $(yaml-quote ${RUNTIME_CONFIG})
 KUBERNETES_MASTER_NAME: $(yaml-quote ${MASTER_NAME})
 KUBERNETES_CONTAINER_RUNTIME: $(yaml-quote ${CONTAINER_RUNTIME})

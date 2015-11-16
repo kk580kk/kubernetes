@@ -76,10 +76,14 @@ func (nodeStrategy) Validate(ctx api.Context, obj runtime.Object) fielderrors.Va
 	return validation.ValidateNode(node)
 }
 
+// Canonicalize normalizes the object after validation.
+func (nodeStrategy) Canonicalize(obj runtime.Object) {
+}
+
 // ValidateUpdate is the default update validation for an end user.
 func (nodeStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
 	errorList := validation.ValidateNode(obj.(*api.Node))
-	return append(errorList, validation.ValidateNodeUpdate(old.(*api.Node), obj.(*api.Node))...)
+	return append(errorList, validation.ValidateNodeUpdate(obj.(*api.Node), old.(*api.Node))...)
 }
 
 func (nodeStrategy) AllowUnconditionalUpdate() bool {
@@ -104,7 +108,11 @@ func (nodeStatusStrategy) PrepareForUpdate(obj, old runtime.Object) {
 }
 
 func (nodeStatusStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
-	return validation.ValidateNodeUpdate(old.(*api.Node), obj.(*api.Node))
+	return validation.ValidateNodeUpdate(obj.(*api.Node), old.(*api.Node))
+}
+
+// Canonicalize normalizes the object after validation.
+func (nodeStatusStrategy) Canonicalize(obj runtime.Object) {
 }
 
 // ResourceGetter is an interface for retrieving resources by ResourceLocation.
@@ -112,12 +120,13 @@ type ResourceGetter interface {
 	Get(api.Context, string) (runtime.Object, error)
 }
 
-// NodeToSelectableFields returns a label set that represents the object.
+// NodeToSelectableFields returns a field set that represents the object.
 func NodeToSelectableFields(node *api.Node) fields.Set {
-	return fields.Set{
-		"metadata.name":      node.Name,
+	objectMetaFieldsSet := generic.ObjectMetaFieldsSet(node.ObjectMeta, false)
+	specificFieldsSet := fields.Set{
 		"spec.unschedulable": fmt.Sprint(node.Spec.Unschedulable),
 	}
+	return generic.MergeFieldsSets(objectMetaFieldsSet, specificFieldsSet)
 }
 
 // MatchNode returns a generic matcher for a given label and field selector.

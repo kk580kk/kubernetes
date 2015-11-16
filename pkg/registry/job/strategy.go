@@ -63,6 +63,10 @@ func (jobStrategy) Validate(ctx api.Context, obj runtime.Object) fielderrors.Val
 	return validation.ValidateJob(job)
 }
 
+// Canonicalize normalizes the object after validation.
+func (jobStrategy) Canonicalize(obj runtime.Object) {
+}
+
 func (jobStrategy) AllowUnconditionalUpdate() bool {
 	return true
 }
@@ -75,7 +79,7 @@ func (jobStrategy) AllowCreateOnUpdate() bool {
 // ValidateUpdate is the default update validation for an end user.
 func (jobStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
 	validationErrorList := validation.ValidateJob(obj.(*extensions.Job))
-	updateErrorList := validation.ValidateJobUpdate(old.(*extensions.Job), obj.(*extensions.Job))
+	updateErrorList := validation.ValidateJobUpdate(obj.(*extensions.Job), old.(*extensions.Job))
 	return append(validationErrorList, updateErrorList...)
 }
 
@@ -97,7 +101,7 @@ func (jobStatusStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object
 
 // JobSelectableFields returns a field set that represents the object for matching purposes.
 func JobToSelectableFields(job *extensions.Job) fields.Set {
-	objectMetaFieldsSet := generic.ObjectMetaFieldsSet(job.ObjectMeta)
+	objectMetaFieldsSet := generic.ObjectMetaFieldsSet(job.ObjectMeta, true)
 	specificFieldsSet := fields.Set{
 		"status.successful": strconv.Itoa(job.Status.Succeeded),
 	}

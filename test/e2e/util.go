@@ -33,7 +33,10 @@ import (
 
 	"k8s.io/kubernetes/pkg/api"
 	apierrs "k8s.io/kubernetes/pkg/api/errors"
+	"k8s.io/kubernetes/pkg/api/latest"
 	"k8s.io/kubernetes/pkg/api/resource"
+	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/apis/extensions"
 	"k8s.io/kubernetes/pkg/client/cache"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
@@ -63,6 +66,9 @@ const (
 	// Initial pod start can be delayed O(minutes) by slow docker pulls
 	// TODO: Make this 30 seconds once #4566 is resolved.
 	podStartTimeout = 5 * time.Minute
+
+	// Some pods can take much longer to get ready due to volume attach/detach latency.
+	slowPodStartTimeout = 15 * time.Minute
 
 	// How long to wait for a service endpoint to be resolvable.
 	serviceStartTimeout = 1 * time.Minute
@@ -106,20 +112,22 @@ type CloudConfig struct {
 }
 
 type TestContextType struct {
-	KubeConfig            string
-	KubeContext           string
-	CertDir               string
-	Host                  string
-	RepoRoot              string
-	Provider              string
-	CloudConfig           CloudConfig
-	KubectlPath           string
-	OutputDir             string
-	prefix                string
-	MinStartupPods        int
-	UpgradeTarget         string
-	PrometheusPushGateway string
-	VerifyServiceAccount  bool
+	KubeConfig                        string
+	KubeContext                       string
+	CertDir                           string
+	Host                              string
+	RepoRoot                          string
+	Provider                          string
+	CloudConfig                       CloudConfig
+	KubectlPath                       string
+	OutputDir                         string
+	prefix                            string
+	MinStartupPods                    int
+	UpgradeTarget                     string
+	PrometheusPushGateway             string
+	VerifyServiceAccount              bool
+	DeleteNamespace                   bool
+	GatherKubeSystemResourceUsageData bool
 }
 
 var testContext TestContextType
@@ -198,6 +206,10 @@ type RCConfig struct {
 	// Maximum allowable container failures. If exceeded, RunRC returns an error.
 	// Defaults to replicas*0.1 if unspecified.
 	MaxContainerFailures *int
+}
+
+type DeploymentConfig struct {
+	RCConfig
 }
 
 func nowStamp() string {
@@ -574,8 +586,20 @@ func deleteNS(c *client.Client, namespace string, timeout time.Duration) error {
 	return nil
 }
 
+// Waits default ammount of time (podStartTimeout) for the specified pod to become running.
+// Returns an error if timeout occurs first, or pod goes in to failed state.
 func waitForPodRunningInNamespace(c *client.Client, podName string, namespace string) error {
-	return waitForPodCondition(c, namespace, podName, "running", podStartTimeout, func(pod *api.Pod) (bool, error) {
+	return waitTimeoutForPodRunningInNamespace(c, podName, namespace, podStartTimeout)
+}
+
+// Waits an extended ammount of time (slowPodStartTimeout) for the specified pod to become running.
+// Returns an error if timeout occurs first, or pod goes in to failed state.
+func waitForPodRunningInNamespaceSlow(c *client.Client, podName string, namespace string) error {
+	return waitTimeoutForPodRunningInNamespace(c, podName, namespace, slowPodStartTimeout)
+}
+
+func waitTimeoutForPodRunningInNamespace(c *client.Client, podName string, namespace string, timeout time.Duration) error {
+	return waitForPodCondition(c, namespace, podName, "running", timeout, func(pod *api.Pod) (bool, error) {
 		if pod.Status.Phase == api.PodRunning {
 			Logf("Found pod '%s' on node '%s'", podName, pod.Spec.NodeName)
 			return true, nil
@@ -704,7 +728,7 @@ func waitForService(c *client.Client, namespace, name string, exist bool, interv
 func waitForServiceEndpointsNum(c *client.Client, namespace, serviceName string, expectNum int, interval, timeout time.Duration) error {
 	return wait.Poll(interval, timeout, func() (bool, error) {
 		Logf("Waiting for amount of service:%s endpoints to %d", serviceName, expectNum)
-		list, err := c.Endpoints(namespace).List(labels.Everything())
+		list, err := c.Endpoints(namespace).List(labels.Everything(), fields.Everything())
 		if err != nil {
 			return false, err
 		}
@@ -780,9 +804,9 @@ func (r podResponseChecker) checkAllResponses() (done bool, err error) {
 			return false, fmt.Errorf("pod with UID %s is no longer a member of the replica set.  Must have been restarted for some reason.  Current replica set: %v", pod.UID, currentPods)
 		}
 		body, err := r.c.Get().
-			Prefix("proxy").
 			Namespace(r.ns).
 			Resource("pods").
+			SubResource("proxy").
 			Name(string(pod.Name)).
 			Do().
 			Raw()
@@ -877,9 +901,6 @@ func loadClient() (*client.Client, error) {
 	c, err := client.New(config)
 	if err != nil {
 		return nil, fmt.Errorf("error creating client: %v", err.Error())
-	}
-	if c.Timeout == 0 {
-		c.Timeout = singleCallTimeout
 	}
 	return c, nil
 }
@@ -1235,21 +1256,71 @@ func Diff(oldPods []*api.Pod, curPods []*api.Pod) PodDiff {
 	return podInfoMap
 }
 
+// RunDeployment Launches (and verifies correctness) of a Deployment
+// and will wait for all pods it spawns to become "Running".
+// It's the caller's responsibility to clean up externally (i.e. use the
+// namespace lifecycle for handling cleanup).
+func RunDeployment(config DeploymentConfig) error {
+	err := config.create()
+	if err != nil {
+		return err
+	}
+	return config.start()
+}
+
+func (config *DeploymentConfig) create() error {
+	By(fmt.Sprintf("creating deployment %s in namespace %s", config.Name, config.Namespace))
+	deployment := &extensions.Deployment{
+		ObjectMeta: api.ObjectMeta{
+			Name: config.Name,
+		},
+		Spec: extensions.DeploymentSpec{
+			Replicas: config.Replicas,
+			Selector: map[string]string{
+				"name": config.Name,
+			},
+			UniqueLabelKey: "deployment.kubernetes.io/podTemplateHash",
+			Template: api.PodTemplateSpec{
+				ObjectMeta: api.ObjectMeta{
+					Labels: map[string]string{"name": config.Name},
+				},
+				Spec: api.PodSpec{
+					Containers: []api.Container{
+						{
+							Name:    config.Name,
+							Image:   config.Image,
+							Command: config.Command,
+							Ports:   []api.ContainerPort{{ContainerPort: 80}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	config.applyTo(&deployment.Spec.Template)
+
+	_, err := config.Client.Deployments(config.Namespace).Create(deployment)
+	if err != nil {
+		return fmt.Errorf("Error creating deployment: %v", err)
+	}
+	Logf("Created deployment with name: %v, namespace: %v, replica count: %v", deployment.Name, config.Namespace, deployment.Spec.Replicas)
+	return nil
+}
+
 // RunRC Launches (and verifies correctness) of a Replication Controller
 // and will wait for all pods it spawns to become "Running".
 // It's the caller's responsibility to clean up externally (i.e. use the
 // namespace lifecycle for handling cleanup).
 func RunRC(config RCConfig) error {
-	// Don't force tests to fail if they don't care about containers restarting.
-	var maxContainerFailures int
-	if config.MaxContainerFailures == nil {
-		maxContainerFailures = int(math.Max(1.0, float64(config.Replicas)*.01))
-	} else {
-		maxContainerFailures = *config.MaxContainerFailures
+	err := config.create()
+	if err != nil {
+		return err
 	}
+	return config.start()
+}
 
-	label := labels.SelectorFromSet(labels.Set(map[string]string{"name": config.Name}))
-
+func (config *RCConfig) create() error {
 	By(fmt.Sprintf("creating replication controller %s in namespace %s", config.Name, config.Namespace))
 	rc := &api.ReplicationController{
 		ObjectMeta: api.ObjectMeta{
@@ -1277,47 +1348,66 @@ func RunRC(config RCConfig) error {
 			},
 		},
 	}
-	if config.Env != nil {
-		for k, v := range config.Env {
-			c := &rc.Spec.Template.Spec.Containers[0]
-			c.Env = append(c.Env, api.EnvVar{Name: k, Value: v})
-		}
-	}
-	if config.Labels != nil {
-		for k, v := range config.Labels {
-			rc.Spec.Template.ObjectMeta.Labels[k] = v
-		}
-	}
-	if config.Ports != nil {
-		for k, v := range config.Ports {
-			c := &rc.Spec.Template.Spec.Containers[0]
-			c.Ports = append(c.Ports, api.ContainerPort{Name: k, ContainerPort: v})
-		}
-	}
-	if config.CpuLimit > 0 || config.MemLimit > 0 {
-		rc.Spec.Template.Spec.Containers[0].Resources.Limits = api.ResourceList{}
-	}
-	if config.CpuLimit > 0 {
-		rc.Spec.Template.Spec.Containers[0].Resources.Limits[api.ResourceCPU] = *resource.NewMilliQuantity(config.CpuLimit, resource.DecimalSI)
-	}
-	if config.MemLimit > 0 {
-		rc.Spec.Template.Spec.Containers[0].Resources.Limits[api.ResourceMemory] = *resource.NewQuantity(config.MemLimit, resource.DecimalSI)
-	}
-	if config.CpuRequest > 0 || config.MemRequest > 0 {
-		rc.Spec.Template.Spec.Containers[0].Resources.Requests = api.ResourceList{}
-	}
-	if config.CpuRequest > 0 {
-		rc.Spec.Template.Spec.Containers[0].Resources.Requests[api.ResourceCPU] = *resource.NewMilliQuantity(config.CpuRequest, resource.DecimalSI)
-	}
-	if config.MemRequest > 0 {
-		rc.Spec.Template.Spec.Containers[0].Resources.Requests[api.ResourceMemory] = *resource.NewQuantity(config.MemRequest, resource.DecimalSI)
-	}
+
+	config.applyTo(rc.Spec.Template)
 
 	_, err := config.Client.ReplicationControllers(config.Namespace).Create(rc)
 	if err != nil {
 		return fmt.Errorf("Error creating replication controller: %v", err)
 	}
 	Logf("Created replication controller with name: %v, namespace: %v, replica count: %v", rc.Name, config.Namespace, rc.Spec.Replicas)
+	return nil
+}
+
+func (config *RCConfig) applyTo(template *api.PodTemplateSpec) {
+	if config.Env != nil {
+		for k, v := range config.Env {
+			c := &template.Spec.Containers[0]
+			c.Env = append(c.Env, api.EnvVar{Name: k, Value: v})
+		}
+	}
+	if config.Labels != nil {
+		for k, v := range config.Labels {
+			template.ObjectMeta.Labels[k] = v
+		}
+	}
+	if config.Ports != nil {
+		for k, v := range config.Ports {
+			c := &template.Spec.Containers[0]
+			c.Ports = append(c.Ports, api.ContainerPort{Name: k, ContainerPort: v})
+		}
+	}
+	if config.CpuLimit > 0 || config.MemLimit > 0 {
+		template.Spec.Containers[0].Resources.Limits = api.ResourceList{}
+	}
+	if config.CpuLimit > 0 {
+		template.Spec.Containers[0].Resources.Limits[api.ResourceCPU] = *resource.NewMilliQuantity(config.CpuLimit, resource.DecimalSI)
+	}
+	if config.MemLimit > 0 {
+		template.Spec.Containers[0].Resources.Limits[api.ResourceMemory] = *resource.NewQuantity(config.MemLimit, resource.DecimalSI)
+	}
+	if config.CpuRequest > 0 || config.MemRequest > 0 {
+		template.Spec.Containers[0].Resources.Requests = api.ResourceList{}
+	}
+	if config.CpuRequest > 0 {
+		template.Spec.Containers[0].Resources.Requests[api.ResourceCPU] = *resource.NewMilliQuantity(config.CpuRequest, resource.DecimalSI)
+	}
+	if config.MemRequest > 0 {
+		template.Spec.Containers[0].Resources.Requests[api.ResourceMemory] = *resource.NewQuantity(config.MemRequest, resource.DecimalSI)
+	}
+}
+
+func (config *RCConfig) start() error {
+	// Don't force tests to fail if they don't care about containers restarting.
+	var maxContainerFailures int
+	if config.MaxContainerFailures == nil {
+		maxContainerFailures = int(math.Max(1.0, float64(config.Replicas)*.01))
+	} else {
+		maxContainerFailures = *config.MaxContainerFailures
+	}
+
+	label := labels.SelectorFromSet(labels.Set(map[string]string{"name": config.Name}))
+
 	podStore := newPodStore(config.Client, config.Namespace, label, fields.Everything())
 	defer podStore.Stop()
 
@@ -1390,7 +1480,7 @@ func RunRC(config RCConfig) error {
 		}
 
 		Logf("%v Pods: %d out of %d created, %d running, %d pending, %d waiting, %d inactive, %d terminating, %d unknown, %d runningButNotReady ",
-			rc.Name, len(pods), config.Replicas, running, pending, waiting, inactive, terminating, unknown, runningButNotReady)
+			config.Name, len(pods), config.Replicas, running, pending, waiting, inactive, terminating, unknown, runningButNotReady)
 
 		promPushRunningPending(running, pending)
 
@@ -1464,8 +1554,28 @@ func dumpAllPodInfo(c *client.Client) {
 	logPodStates(pods.Items)
 }
 
+func dumpAllNodeInfo(c *client.Client) {
+	nodes, err := c.Nodes().List(labels.Everything(), fields.Everything())
+	if err != nil {
+		Logf("unable to fetch node list: %v", err)
+		return
+	}
+	names := make([]string, len(nodes.Items))
+	for ix := range nodes.Items {
+		names[ix] = nodes.Items[ix].Name
+	}
+	dumpNodeDebugInfo(c, names)
+}
+
 func dumpNodeDebugInfo(c *client.Client, nodeNames []string) {
 	for _, n := range nodeNames {
+		Logf("\nLogging node info for node %v", n)
+		node, err := c.Nodes().Get(n)
+		if err != nil {
+			Logf("Error getting node info %v", err)
+		}
+		Logf("Node Info: %v", node)
+
 		Logf("\nLogging kubelet events for node %v", n)
 		for _, e := range getNodeEvents(c, n) {
 			Logf("source %v message %v reason %v first ts %v last ts %v, involved obj %+v",
@@ -1833,6 +1943,50 @@ func sshCore(cmd, host, provider string, verbose bool) (string, string, int, err
 	return stdout, stderr, code, err
 }
 
+// NewHostExecPodSpec returns the pod spec of hostexec pod
+func NewHostExecPodSpec(ns, name string) *api.Pod {
+	pod := &api.Pod{
+		TypeMeta: unversioned.TypeMeta{
+			Kind:       "Pod",
+			APIVersion: latest.GroupOrDie("").Version,
+		},
+		ObjectMeta: api.ObjectMeta{
+			Name:      name,
+			Namespace: ns,
+		},
+		Spec: api.PodSpec{
+			Containers: []api.Container{
+				{
+					Name:            "hostexec",
+					Image:           "gcr.io/google_containers/hostexec:1.2",
+					ImagePullPolicy: api.PullIfNotPresent,
+				},
+			},
+			SecurityContext: &api.PodSecurityContext{
+				HostNetwork: true,
+			},
+		},
+	}
+	return pod
+}
+
+// RunHostCmd runs the given cmd in the context of the given pod using `kubectl exec`
+// inside of a shell.
+func RunHostCmd(ns, name, cmd string) string {
+	return runKubectl("exec", fmt.Sprintf("--namespace=%v", ns), name, "--", "/bin/sh", "-c", cmd)
+}
+
+// LaunchHostExecPod launches a hostexec pod in the given namespace and waits
+// until it's Running
+func LaunchHostExecPod(client *client.Client, ns, name string) *api.Pod {
+	hostExecPod := NewHostExecPodSpec(ns, name)
+	pod, err := client.Pods(ns).Create(hostExecPod)
+	expectNoError(err)
+	err = waitForPodRunningInNamespace(client, pod.Name, pod.Namespace)
+	expectNoError(err)
+	return pod
+}
+
 // getSigner returns an ssh.Signer for the provider ("gce", etc.) that can be
 // used to SSH to their nodes.
 func getSigner(provider string) (ssh.Signer, error) {
@@ -2140,4 +2294,37 @@ func OpenWebSocketForURL(url *url.URL, config *client.Config, protocols []string
 	cfg.TlsConfig = tlsConfig
 	cfg.Protocol = protocols
 	return websocket.DialConfig(cfg)
+}
+
+// getIngressAddress returns the ips/hostnames associated with the Ingress.
+func getIngressAddress(client *client.Client, ns, name string) ([]string, error) {
+	ing, err := client.Extensions().Ingress(ns).Get(name)
+	if err != nil {
+		return nil, err
+	}
+	addresses := []string{}
+	for _, a := range ing.Status.LoadBalancer.Ingress {
+		if a.IP != "" {
+			addresses = append(addresses, a.IP)
+		}
+		if a.Hostname != "" {
+			addresses = append(addresses, a.Hostname)
+		}
+	}
+	return addresses, nil
+}
+
+// waitForIngressAddress waits for the Ingress to acquire an address.
+func waitForIngressAddress(c *client.Client, ns, ingName string, timeout time.Duration) (string, error) {
+	var address string
+	err := wait.PollImmediate(10*time.Second, timeout, func() (bool, error) {
+		ipOrNameList, err := getIngressAddress(c, ns, ingName)
+		if err != nil || len(ipOrNameList) == 0 {
+			Logf("Waiting for Ingress %v to acquire IP, error %v", ingName, err)
+			return false, nil
+		}
+		address = ipOrNameList[0]
+		return true, nil
+	})
+	return address, err
 }

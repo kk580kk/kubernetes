@@ -327,6 +327,11 @@ func NewOrDie(c *Config) *Client {
 // running inside a pod running on kuberenetes. It will return an error if
 // called from a process not running in a kubernetes environment.
 func InClusterConfig() (*Config, error) {
+	host, port := os.Getenv("KUBERNETES_SERVICE_HOST"), os.Getenv("KUBERNETES_SERVICE_PORT")
+	if len(host) == 0 || len(port) == 0 {
+		return nil, fmt.Errorf("unable to load in-cluster configuration, KUBERNETES_SERVICE_HOST and KUBERNETES_SERVICE_PORT must be defined")
+	}
+
 	token, err := ioutil.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/" + api.ServiceAccountTokenKey)
 	if err != nil {
 		return nil, err
@@ -341,7 +346,7 @@ func InClusterConfig() (*Config, error) {
 
 	return &Config{
 		// TODO: switch to using cluster DNS.
-		Host:            "https://" + net.JoinHostPort(os.Getenv("KUBERNETES_SERVICE_HOST"), os.Getenv("KUBERNETES_SERVICE_PORT")),
+		Host:            "https://" + net.JoinHostPort(host, port),
 		BearerToken:     string(token),
 		TLSClientConfig: tlsClientConfig,
 	}, nil
@@ -394,6 +399,31 @@ func RESTClientFor(config *Config) (*RESTClient, error) {
 	if len(config.Version) == 0 {
 		return nil, fmt.Errorf("version is required when initializing a RESTClient")
 	}
+	if config.Codec == nil {
+		return nil, fmt.Errorf("Codec is required when initializing a RESTClient")
+	}
+
+	baseURL, err := defaultServerUrlFor(config)
+	if err != nil {
+		return nil, err
+	}
+
+	client := NewRESTClient(baseURL, config.Version, config.Codec, config.QPS, config.Burst)
+
+	transport, err := TransportFor(config)
+	if err != nil {
+		return nil, err
+	}
+
+	if transport != http.DefaultTransport {
+		client.Client = &http.Client{Transport: transport}
+	}
+	return client, nil
+}
+
+// UnversionedRESTClientFor is the same as RESTClientFor, except that it allows
+// the config.Version to be empty.
+func UnversionedRESTClientFor(config *Config) (*RESTClient, error) {
 	if config.Codec == nil {
 		return nil, fmt.Errorf("Codec is required when initializing a RESTClient")
 	}

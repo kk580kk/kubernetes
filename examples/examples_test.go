@@ -225,7 +225,6 @@ func TestExampleObjectSchemas(t *testing.T) {
 		"../docs/user-guide": {
 			"multi-pod":            nil,
 			"pod":                  &api.Pod{},
-			"replication":          &api.ReplicationController{},
 			"job":                  &extensions.Job{},
 			"ingress":              &extensions.Ingress{},
 			"nginx-deployment":     &extensions.Deployment{},
@@ -356,10 +355,12 @@ func TestExampleObjectSchemas(t *testing.T) {
 			"secret":     &api.Secret{},
 		},
 		"../examples/spark": {
+			"spark-master-controller": &api.ReplicationController{},
 			"spark-master-service":    &api.Service{},
-			"spark-master":            &api.Pod{},
+			"spark-webui":             &api.Service{},
 			"spark-worker-controller": &api.ReplicationController{},
-			"spark-driver":            &api.Pod{},
+			"zeppelin-controller":     &api.ReplicationController{},
+			"zeppelin-service":        &api.Service{},
 		},
 		"../examples/spark/spark-gluster": {
 			"spark-master-service":    &api.Service{},
@@ -463,7 +464,6 @@ func TestReadme(t *testing.T) {
 		{"../README.md", []runtime.Object{&api.Pod{}}},
 		{"../docs/user-guide/walkthrough/README.md", []runtime.Object{&api.Pod{}}},
 		{"../examples/iscsi/README.md", []runtime.Object{&api.Pod{}}},
-		{"../docs/user-guide/simple-yaml.md", []runtime.Object{&api.Pod{}, &api.ReplicationController{}}},
 	}
 
 	for _, path := range paths {

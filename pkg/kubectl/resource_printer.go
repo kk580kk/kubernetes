@@ -731,7 +731,7 @@ func printJob(job *extensions.Job, w io.Writer, withNamespace bool, wide bool, s
 	}
 
 	selector, _ := extensions.PodSelectorAsSelector(job.Spec.Selector)
-	_, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\n",
+	_, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d",
 		name,
 		firstContainer.Name,
 		firstContainer.Image,
@@ -1376,9 +1376,8 @@ func printDeploymentList(list *extensions.DeploymentList, w io.Writer, withNames
 func printHorizontalPodAutoscaler(hpa *extensions.HorizontalPodAutoscaler, w io.Writer, withNamespace bool, wide bool, showAll bool, columnLabels []string) error {
 	namespace := hpa.Namespace
 	name := hpa.Name
-	reference := fmt.Sprintf("%s/%s/%s/%s",
+	reference := fmt.Sprintf("%s/%s/%s",
 		hpa.Spec.ScaleRef.Kind,
-		hpa.Spec.ScaleRef.Namespace,
 		hpa.Spec.ScaleRef.Name,
 		hpa.Spec.ScaleRef.Subresource)
 	target := "<unset>"
@@ -1542,11 +1541,11 @@ func (p *TemplatePrinter) PrintObj(obj runtime.Object, w io.Writer) error {
 		// It is way easier to debug this stuff when it shows up in
 		// stdout instead of just stdin. So in addition to returning
 		// a nice error, also print useful stuff with the writer.
-		fmt.Fprintf(w, "Error executing template: %v\n", err)
-		fmt.Fprintf(w, "template was:\n\t%v\n", p.rawTemplate)
-		fmt.Fprintf(w, "raw data was:\n\t%v\n", string(data))
-		fmt.Fprintf(w, "object given to template engine was:\n\t%+v\n", out)
-		return fmt.Errorf("error executing template '%v': '%v'\n----data----\n%+v\n", p.rawTemplate, err, out)
+		fmt.Fprintf(w, "Error executing template: %v. Printing more information for debugging the template:\n", err)
+		fmt.Fprintf(w, "\ttemplate was:\n\t\t%v\n", p.rawTemplate)
+		fmt.Fprintf(w, "\traw data was:\n\t\t%v\n", string(data))
+		fmt.Fprintf(w, "\tobject given to template engine was:\n\t\t%+v\n\n", out)
+		return fmt.Errorf("error executing template %q: %v", p.rawTemplate, err)
 	}
 	return nil
 }
@@ -1693,10 +1692,10 @@ func (j *JSONPathPrinter) PrintObj(obj runtime.Object, w io.Writer) error {
 	}
 
 	if err := j.JSONPath.Execute(w, queryObj); err != nil {
-		fmt.Fprintf(w, "Error executing template: %v\n", err)
-		fmt.Fprintf(w, "template was:\n\t%v\n", j.rawTemplate)
-		fmt.Fprintf(w, "object given to jsonpath engine was:\n\t%#v\n", queryObj)
-		return fmt.Errorf("error executing jsonpath '%v': '%v'\n----data----\n%+v\n", j.rawTemplate, err, obj)
+		fmt.Fprintf(w, "Error executing template: %v. Printing more information for debugging the template:\n", err)
+		fmt.Fprintf(w, "\ttemplate was:\n\t\t%v\n", j.rawTemplate)
+		fmt.Fprintf(w, "\tobject given to jsonpath engine was:\n\t\t%#v\n\n", queryObj)
+		return fmt.Errorf("error executing jsonpath %q: %v\n", j.rawTemplate, err)
 	}
 	return nil
 }

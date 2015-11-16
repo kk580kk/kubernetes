@@ -47,6 +47,18 @@ function join_regex_no_empty() {
     fi
 }
 
+# GCP Project to fetch Trusty images.
+TRUSTY_IMAGE_PROJECT="${TRUSTY_IMAGE_PROJECT:-}"
+
+# Get the latest Trusty image for a Jenkins job.
+function get_latest_trusty_image() {
+    local image_index="${1:-${JOB_NAME}}"
+    gsutil cat "gs://${TRUSTY_IMAGE_PROJECT}/image-indices/latest-test-image-${image_index}"
+    # Clean up gsutil artifacts otherwise the later test stage will complain.
+    rm -rf .config &> /dev/null
+    rm -rf .gsutil &> /dev/null
+}
+
 echo "--------------------------------------------------------------------------------"
 echo "Initial Environment:"
 printenv | sort
@@ -95,7 +107,6 @@ fi
 
 # Specialized to skip when running reboot tests.
 REBOOT_SKIP_TESTS=(
-    "Autoscaling\sSuite"
     "Skipped"
     "Restart\sshould\srestart\sall\snodes"
     "Example"
@@ -104,30 +115,40 @@ REBOOT_SKIP_TESTS=(
 # Specialized tests which should be skipped by default for projects.
 GCE_DEFAULT_SKIP_TESTS=(
     "${REBOOT_SKIP_TESTS[@]}"
+    "Autoscaling\sSuite"
     "Reboot"
     "ServiceLoadBalancer"
     )
 
 # Tests which cannot be run on GKE, e.g. because they require
-# master ssh access or experimental api.
+# master ssh access.
 GKE_REQUIRED_SKIP_TESTS=(
     "Nodes"
     "Etcd\sFailure"
     "MasterCerts"
+    "experimental\sresource\susage\stracking" # Expect --max-pods=100
+    "ServiceLoadBalancer" # issue: #16602
+    "Shell"
+    )
+
+# Specialized tests which should be skipped by default for GKE.
+GKE_DEFAULT_SKIP_TESTS=(
     "Daemon\sset"
     "Deployment"
-    "experimental\sresource\susage\stracking" # Expect --max-pods=100
-    "Shell"
+    "Jobs"
+    "${GKE_REQUIRED_SKIP_TESTS[@]}"
     )
 
 # Tests which cannot be run on AWS.
 AWS_REQUIRED_SKIP_TESTS=(
     "experimental\sresource\susage\stracking" # Expect --max-pods=100
+    "GCE\sL7\sLoadBalancer\sController" # GCE L7 loadbalancing
 )
 
 
 # Tests which kills or restarts components and/or nodes.
 DISRUPTIVE_TESTS=(
+    "Autoscaling\sSuite.*scale\scluster"
     "DaemonRestart"
     "Etcd\sfailure"
     "Nodes\sResize"
@@ -152,6 +173,13 @@ GCE_FLAKY_TESTS=(
 # comments below, and for poorly implemented tests, please quote the
 # issue number tracking speed improvements.
 GCE_SLOW_TESTS=(
+    # TODO: add deployment test here once it will become stable
+    "Autoscaling\sSuite.*via\sreplicationController"
+    # Before enabling this loadbalancer test in any other test list you must
+    # make sure the associated project has enough quota. At the time of this
+    # writing a GCE project is allowed 3 backend services by default. This
+    # test requires at least 5.
+    "GCE\sL7\sLoadBalancer\sController"               # 10 min,       file: ingress.go,              slow by design
     "SchedulerPredicates\svalidates\sMaxPods\slimit " # 8 min,        file: scheduler_predicates.go, PR:    #13315
     "Nodes\sResize"                                   # 3 min 30 sec, file: resize_nodes.go,         issue: #13323
     "resource\susage\stracking"                       # 1 hour,       file: kubelet_perf.go,         slow by design
@@ -163,6 +191,7 @@ GCE_SLOW_TESTS=(
 
 # Tests which are not able to be run in parallel.
 GCE_PARALLEL_SKIP_TESTS=(
+    "GCE\sL7\sLoadBalancer\sController" # TODO: This cannot run in parallel with other L4 tests till quota has been bumped up.
     "Nodes\sNetwork"
     "MaxPods"
     "Resource\susage\sof\ssystem\scontainers"
@@ -177,12 +206,12 @@ GCE_PARALLEL_FLAKY_TESTS=(
     "Elasticsearch"
     "Namespaces.*should\sdelete\sfast"
     "ServiceAccounts"
-    "Networking\sshould\sfunction\sfor\sintra-pod\scommunication"  # possibly causing Ginkgo to get stuck, issue: #13485
     "Services.*identically\snamed" # error waiting for reachability, issue: #16285
     )
 
 # Tests that should not run on soak cluster.
 GCE_SOAK_CONTINUOUS_SKIP_TESTS=(
+    "GCE\sL7\sLoadBalancer\sController" # issue: #17119
     "Density.*30\spods"
     "Elasticsearch"
     "external\sload\sbalancer"
@@ -194,6 +223,12 @@ GCE_SOAK_CONTINUOUS_SKIP_TESTS=(
 
 GCE_RELEASE_SKIP_TESTS=(
     )
+
+# TODO(wonderfly): Delete this once
+# https://github.com/kubernetes/kubernetes/issues/12689 is fixed.
+TRUSTY_SKIP_TESTS=(
+    "Services.*should\swork\safter\srestarting\skube-proxy"
+)
 
 # Define environment variables based on the Jenkins project name.
 case ${JOB_NAME} in
@@ -374,7 +409,29 @@ case ${JOB_NAME} in
     MINION_DISK_SIZE="50GB"
     NUM_MINIONS="100"
     # Reduce logs verbosity
-    TEST_CLUSTER_LOG_LEVEL="--v=1"
+    TEST_CLUSTER_LOG_LEVEL="--v=2"
+    # Increase resync period to simulate production
+    TEST_CLUSTER_RESYNC_PERIOD="--min-resync-period=12h"
+    ;;
+
+  # Runs the performance/scalability tests on GCE using the latest 1.1 ci
+  # release. A larger cluster is used.
+  kubernetes-e2e-gce-scalability-1.1)
+    : ${E2E_CLUSTER_NAME:="jenkins-gce-e2e-scalability-1.1"}
+    : ${E2E_NETWORK:="e2e-scalability-1-1"}
+    : ${GINKGO_TEST_ARGS:="--ginkgo.focus=Performance\ssuite"}
+    : ${JENKINS_PUBLISHED_VERSION:="ci/latest-1.1"}
+    : ${KUBE_GCE_INSTANCE_PREFIX:="e2e-scalability-1-1"}
+    : ${KUBE_GCS_STAGING_PATH_SUFFIX:="scalability-1.1"}
+    : ${PROJECT:="k8s-e2e-gce-scalability-1-1"}
+    # Override GCE defaults.
+    E2E_ZONE="us-east1-b"
+    MASTER_SIZE="n1-standard-4"
+    MINION_SIZE="n1-standard-2"
+    MINION_DISK_SIZE="50GB"
+    NUM_MINIONS="100"
+    # Reduce logs verbosity
+    TEST_CLUSTER_LOG_LEVEL="--v=2"
     # Increase resync period to simulate production
     TEST_CLUSTER_RESYNC_PERIOD="--min-resync-period=12h"
     ;;
@@ -451,6 +508,50 @@ case ${JOB_NAME} in
     : ${PROJECT:="k8s-jkns-e2e-gce-release"}
     ;;
 
+  # Runs non-flaky tests on GCE with Trusty as base image for minions,
+  # sequentially.
+  kubernetes-e2e-gce-trusty-release)
+    : ${E2E_CLUSTER_NAME:="jenkins-gce-e2e-trusty-release"}
+    : ${E2E_DOWN:="false"}
+    : ${E2E_NETWORK:="e2e-gce-trusty-release"}
+    : ${GINKGO_TEST_ARGS:="--ginkgo.skip=$(join_regex_allow_empty \
+          ${GCE_DEFAULT_SKIP_TESTS[@]:+${GCE_DEFAULT_SKIP_TESTS[@]}} \
+          ${GCE_RELEASE_SKIP_TESTS[@]:+${GCE_RELEASE_SKIP_TESTS[@]}} \
+          ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
+          ${TRUSTY_SKIP_TESTS[@]:+${TRUSTY_SKIP_TESTS[@]}} \
+          )"}
+    : ${KUBE_GCE_INSTANCE_PREFIX="e2e-gce"}
+    : ${PROJECT:="kubekins-e2e-gce-trusty-rls"}
+    : ${KUBE_GCE_MINION_PROJECT:="${TRUSTY_IMAGE_PROJECT}"}
+    : ${KUBE_GCE_MINION_IMAGE:="$(get_latest_trusty_image ${JOB_NAME})"}
+    : ${KUBE_OS_DISTRIBUTION:="trusty"}
+    : ${ENABLE_CLUSTER_REGISTRY:=false}
+    # Ideally we would pin to the latest release version but since 1.1 is not
+    # out, we use the latest build number from the CI job.
+    : ${JENKINS_EXPLICIT_VERSION:="release/v1.1.1"}
+    ;;
+
+  # Runs non-flaky tests on GCE with Trusty-beta as base image for minions,
+  # sequentially.
+  kubernetes-e2e-gce-trusty-release-beta)
+    : ${E2E_CLUSTER_NAME:="jenkins-gce-e2e-trusty-release-beta"}
+    : ${E2E_DOWN:="false"}
+    : ${E2E_NETWORK:="e2e-gce-trusty-release-beta"}
+    : ${GINKGO_TEST_ARGS:="--ginkgo.skip=$(join_regex_allow_empty \
+          ${GCE_DEFAULT_SKIP_TESTS[@]:+${GCE_DEFAULT_SKIP_TESTS[@]}} \
+          ${GCE_RELEASE_SKIP_TESTS[@]:+${GCE_RELEASE_SKIP_TESTS[@]}} \
+          ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
+          ${TRUSTY_SKIP_TESTS[@]:+${TRUSTY_SKIP_TESTS[@]}} \
+          )"}
+    : ${KUBE_GCE_INSTANCE_PREFIX="e2e-gce"}
+    : ${PROJECT:="k8s-e2e-gce-trusty-beta"}
+    : ${KUBE_GCE_MINION_PROJECT:="${TRUSTY_IMAGE_PROJECT}"}
+    : ${KUBE_GCE_MINION_IMAGE:="$(get_latest_trusty_image ${JOB_NAME})"}
+    : ${KUBE_OS_DISTRIBUTION:="trusty"}
+    : ${ENABLE_CLUSTER_REGISTRY:=false}
+    : ${JENKINS_EXPLICIT_VERSION:="release/v1.1.1"}
+    ;;
+
   # Runs non-flaky tests on GCE on the release candidate branch,
   # sequentially. As a reminder, if you need to change the skip list
   # or flaky test list on the release branch, you'll need to propose a
@@ -471,6 +572,44 @@ case ${JOB_NAME} in
     : ${ENABLE_DEPLOYMENTS:=true}
     ;;
 
+  # Runs "disruptive" tests on GCE on the release candidate branch,
+  # sequentially, against the latest 1.1 ci release.
+  kubernetes-e2e-gce-disruptive-1.1)
+    : ${E2E_CLUSTER_NAME:="jenkins-gce-e2e-disruptive-1.1"}
+    : ${E2E_DOWN:="false"}
+    : ${E2E_NETWORK:="gce-e2e-disruptive-1-1"}
+    : ${GINKGO_TEST_ARGS:="--ginkgo.skip=$(join_regex_allow_empty \
+          ${REBOOT_SKIP_TESTS[@]:+${REBOOT_SKIP_TESTS[@]}}\
+          ) --ginkgo.focus=$(join_regex_no_empty \
+          ${DISRUPTIVE_TESTS[@]:+${DISRUPTIVE_TESTS[@]}} \
+          "GCE\sL7\sLoadBalancer\sController"
+          )"}
+    : ${JENKINS_PUBLISHED_VERSION:="ci/latest-1.1"}
+    : ${KUBE_GCE_INSTANCE_PREFIX="e2e-gce-disruptive-1-1"}
+    : ${KUBE_GCS_STAGING_PATH_SUFFIX:="disruptive-1.1"}
+    # TODO: move into its own project
+    : ${PROJECT:="kubernetes-jenkins"}
+    : ${ENABLE_DEPLOYMENTS:=true}
+    : ${ENABLE_DAEMONSETS:=true}
+    ;;
+
+  kubernetes-e2e-gke-subnet)
+    : ${DOGFOOD_GCLOUD:="true"}
+    : ${E2E_CLUSTER_NAME:="jkns-gke-subnet"}
+    # auto-subnet manually created - if deleted, it will need to be recreated
+    # gcloud alpha compute networks create auto-subnet --mode auto
+    : ${E2E_NETWORK:="auto-subnet"}
+    : ${E2E_SET_CLUSTER_API_VERSION:=y}
+    : ${JENKINS_USE_SERVER_VERSION:=y}
+    : ${PROJECT:="k8s-jkns-e2e-gke-subnet"}
+    : ${FAIL_ON_GCP_RESOURCE_LEAK:="true"}
+    : ${GINKGO_TEST_ARGS:="--ginkgo.skip=$(join_regex_allow_empty \
+          ${GKE_REQUIRED_SKIP_TESTS[@]:+${GKE_REQUIRED_SKIP_TESTS[@]}} \
+          ${GCE_DEFAULT_SKIP_TESTS[@]:+${GCE_DEFAULT_SKIP_TESTS[@]}} \
+          ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
+          )"}
+    ;;
+
   kubernetes-e2e-gke-prod)
     : ${DOGFOOD_GCLOUD:="true"}
     : ${E2E_CLUSTER_NAME:="jkns-gke-e2e-prod"}
@@ -480,7 +619,7 @@ case ${JOB_NAME} in
     : ${PROJECT:="k8s-jkns-e2e-gke-prod"}
     : ${FAIL_ON_GCP_RESOURCE_LEAK:="true"}
     : ${GINKGO_TEST_ARGS:="--ginkgo.skip=$(join_regex_allow_empty \
-          ${GKE_REQUIRED_SKIP_TESTS[@]:+${GKE_REQUIRED_SKIP_TESTS[@]}} \
+          ${GKE_DEFAULT_SKIP_TESTS[@]:+${GKE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_DEFAULT_SKIP_TESTS[@]:+${GCE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
           )"}
@@ -496,7 +635,7 @@ case ${JOB_NAME} in
     : ${PROJECT:="k8s-jkns-e2e-gke-staging"}
     : ${FAIL_ON_GCP_RESOURCE_LEAK:="true"}
     : ${GINKGO_TEST_ARGS:="--ginkgo.skip=$(join_regex_allow_empty \
-          ${GKE_REQUIRED_SKIP_TESTS[@]:+${GKE_REQUIRED_SKIP_TESTS[@]}} \
+          ${GKE_DEFAULT_SKIP_TESTS[@]:+${GKE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_DEFAULT_SKIP_TESTS[@]:+${GCE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
           )"}
@@ -508,11 +647,12 @@ case ${JOB_NAME} in
     : ${GKE_API_ENDPOINT:="https://test-container.sandbox.googleapis.com/"}
     : ${E2E_CLUSTER_NAME:="jkns-gke-e2e-test"}
     : ${E2E_NETWORK:="e2e-gke-test"}
-    : ${JENKINS_PUBLISHED_VERSION:="release/latest"}
-    : ${PROJECT:="k8s-jkns-e2e-gke-ci"}
+    : ${E2E_SET_CLUSTER_API_VERSION:=y}
+    : ${JENKINS_USE_SERVER_VERSION:=y}
+    : ${PROJECT:="k8s-jkns-e2e-gke-test"}
     : ${FAIL_ON_GCP_RESOURCE_LEAK:="true"}
     : ${GINKGO_TEST_ARGS:="--ginkgo.skip=$(join_regex_allow_empty \
-          ${GKE_REQUIRED_SKIP_TESTS[@]:+${GKE_REQUIRED_SKIP_TESTS[@]}} \
+          ${GKE_DEFAULT_SKIP_TESTS[@]:+${GKE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_DEFAULT_SKIP_TESTS[@]:+${GCE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
           )"}
@@ -528,7 +668,7 @@ case ${JOB_NAME} in
     : ${PROJECT:="k8s-jkns-e2e-gke-ci"}
     : ${FAIL_ON_GCP_RESOURCE_LEAK:="true"}
     : ${GINKGO_TEST_ARGS:="--ginkgo.skip=$(join_regex_allow_empty \
-          ${GKE_REQUIRED_SKIP_TESTS[@]:+${GKE_REQUIRED_SKIP_TESTS[@]}} \
+          ${GKE_DEFAULT_SKIP_TESTS[@]:+${GKE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_DEFAULT_SKIP_TESTS[@]:+${GCE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
           ${GCE_SLOW_TESTS[@]:+${GCE_SLOW_TESTS[@]}} \
@@ -540,16 +680,82 @@ case ${JOB_NAME} in
     : ${CLOUDSDK_BUCKET:="gs://cloud-sdk-build/testing/staging"}
     : ${GKE_API_ENDPOINT:="https://test-container.sandbox.googleapis.com/"}
     : ${E2E_CLUSTER_NAME:="jkns-gke-e2e-ci-reboot"}
-    : ${E2E_NETWORK:="e2e-gke-ci"}
+    : ${E2E_NETWORK:="e2e-gke-ci-reboot"}
     : ${E2E_SET_CLUSTER_API_VERSION:=y}
-    : ${PROJECT:="k8s-jkns-e2e-gke-ci"}
+    : ${PROJECT:="k8s-jkns-e2e-gke-ci-reboot"}
     : ${FAIL_ON_GCP_RESOURCE_LEAK:="true"}
     : ${GINKGO_TEST_ARGS:="--ginkgo.skip=$(join_regex_allow_empty \
-          ${GKE_REQUIRED_SKIP_TESTS[@]:+${GKE_REQUIRED_SKIP_TESTS[@]}} \
+          ${GKE_DEFAULT_SKIP_TESTS[@]:+${GKE_DEFAULT_SKIP_TESTS[@]}} \
           ${REBOOT_SKIP_TESTS[@]:+${REBOOT_SKIP_TESTS[@]}} \
           ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
-          ${GCE_PARALLEL_SKIP_TESTS[@]:+${GCE_PARALLEL_SKIP_TESTS[@]}} \
           ${GCE_SLOW_TESTS[@]:+${GCE_SLOW_TESTS[@]}} \
+          ) --ginkgo.focus=Reboot"}
+    ;;
+
+  kubernetes-e2e-gke-1.1)
+    : ${DOGFOOD_GCLOUD:="true"}
+    : ${GKE_API_ENDPOINT:="https://test-container.sandbox.googleapis.com/"}
+    : ${E2E_CLUSTER_NAME:="gke-release-1-1"}
+    : ${E2E_NETWORK:="gke-release-1-1"}
+    : ${E2E_SET_CLUSTER_API_VERSION:=y}
+    : ${JENKINS_PUBLISHED_VERSION:="ci/latest-1.1"}
+    : ${PROJECT:="k8s-jkns-e2e-gke-release-1-1"}
+    : ${FAIL_ON_GCP_RESOURCE_LEAK:="true"}
+    # Note Daemon sets and Deployments are experimental features in 1.1,
+    # and are turned off in GKE.
+    : ${GINKGO_TEST_ARGS:="--ginkgo.skip=$(join_regex_allow_empty \
+          ${GKE_REQUIRED_SKIP_TESTS[@]:+${GKE_REQUIRED_SKIP_TESTS[@]}} \
+          "Daemon\sset|Deployment" \
+          ${GCE_DEFAULT_SKIP_TESTS[@]:+${GCE_DEFAULT_SKIP_TESTS[@]}} \
+          ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
+          ${GCE_SLOW_TESTS[@]:+${GCE_SLOW_TESTS[@]}} \
+          )"}
+    ;;
+
+  kubernetes-e2e-gke-1.1-features)
+    : ${DOGFOOD_GCLOUD:="true"}
+    : ${GKE_API_ENDPOINT:="https://test-container.sandbox.googleapis.com/"}
+    : ${E2E_CLUSTER_NAME:="gke-1-1-features"}
+    : ${E2E_NETWORK:="gke-1-1-features"}
+    : ${E2E_SET_CLUSTER_API_VERSION:=y}
+    : ${JENKINS_PUBLISHED_VERSION:="ci/latest-1.1"}
+    : ${PROJECT:="k8s-jkns-e2e-gke-1-1-features"}
+    : ${FAIL_ON_GCP_RESOURCE_LEAK:="true"}
+    : ${GINKGO_TEST_ARGS:="--ginkgo.focus=GCE\sL7\sLoadBalancer\sController|Job|Horizontal\spod\sautoscaling"}
+    # At least n1-standard-2 nodes are required for the cluster to
+    # have enough cpu/ram to run the Horizontal pod autoscaling tests.
+    MINION_SIZE="n1-standard-2"
+    ;;
+
+  # Sets up the GKE soak cluster weekly using the latest CI release.
+  kubernetes-soak-weekly-deploy-gke)
+    : ${GKE_API_ENDPOINT:="https://test-container.sandbox.googleapis.com/"}
+    : ${E2E_CLUSTER_NAME:="jenkins-gke-soak-weekly"}
+    : ${E2E_DOWN:="false"}
+    : ${E2E_NETWORK:="gke-soak-weekly"}
+    : ${E2E_SET_CLUSTER_API_VERSION:=y}
+    : ${JENKINS_PUBLISHED_VERSION:="ci/latest"}
+    : ${E2E_TEST:="false"}
+    : ${E2E_UP:="true"}
+    : ${PROJECT:="kubernetes-jenkins"}
+    # Need at least n1-standard-2 nodes to run kubelet_perf tests
+    MINION_SIZE="n1-standard-2"
+    ;;
+
+  # Runs tests on GKE soak cluster.
+  kubernetes-soak-continuous-e2e-gke)
+    : ${GKE_API_ENDPOINT:="https://test-container.sandbox.googleapis.com/"}
+    : ${E2E_CLUSTER_NAME:="jenkins-gke-soak-weekly"}
+    : ${E2E_NETWORK:="gke-soak-weekly"}
+    : ${E2E_DOWN:="false"}
+    : ${E2E_UP:="false"}
+    : ${PROJECT:="kubernetes-jenkins"}
+    : ${E2E_OPT:="--check_version_skew=false"}
+    : ${GINKGO_TEST_ARGS:="--ginkgo.skip=$(join_regex_allow_empty \
+          ${GKE_DEFAULT_SKIP_TESTS[@]:+${GKE_DEFAULT_SKIP_TESTS[@]}} \
+          ${GCE_DEFAULT_SKIP_TESTS[@]:+${GCE_DEFAULT_SKIP_TESTS[@]}} \
+          ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
+          ${GCE_SOAK_CONTINUOUS_SKIP_TESTS[@]:+${GCE_SOAK_CONTINUOUS_SKIP_TESTS[@]}} \
           )"}
     ;;
 
@@ -570,6 +776,7 @@ case ${JOB_NAME} in
     : ${E2E_CLUSTER_NAME:="gke-upgrade"}
     : ${E2E_NETWORK:="gke-upgrade"}
     : ${JENKINS_PUBLISHED_VERSION:="release/latest"}
+    : ${E2E_SET_CLUSTER_API_VERSION:=y}
     : ${PROJECT:="kubernetes-jenkins-gke-upgrade"}
     : ${E2E_UP:="true"}
     : ${E2E_TEST:="false"}
@@ -604,7 +811,7 @@ case ${JOB_NAME} in
     : ${E2E_TEST:="true"}
     : ${E2E_DOWN:="false"}
     : ${GINKGO_TEST_ARGS:="--ginkgo.skip=$(join_regex_allow_empty \
-          ${GKE_REQUIRED_SKIP_TESTS[@]:+${GKE_REQUIRED_SKIP_TESTS[@]}} \
+          ${GKE_DEFAULT_SKIP_TESTS[@]:+${GKE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_DEFAULT_SKIP_TESTS[@]:+${GCE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
           )"}
@@ -638,7 +845,7 @@ case ${JOB_NAME} in
     : ${E2E_TEST:="true"}
     : ${E2E_DOWN:="false"}
     : ${GINKGO_TEST_ARGS:="--ginkgo.skip=$(join_regex_allow_empty \
-          ${GKE_REQUIRED_SKIP_TESTS[@]:+${GKE_REQUIRED_SKIP_TESTS[@]}} \
+          ${GKE_DEFAULT_SKIP_TESTS[@]:+${GKE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_DEFAULT_SKIP_TESTS[@]:+${GCE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
           )"}
@@ -658,7 +865,7 @@ case ${JOB_NAME} in
     : ${E2E_TEST:="true"}
     : ${E2E_DOWN:="true"}
     : ${GINKGO_TEST_ARGS:="--ginkgo.skip=$(join_regex_allow_empty \
-          ${GKE_REQUIRED_SKIP_TESTS[@]:+${GKE_REQUIRED_SKIP_TESTS[@]}} \
+          ${GKE_DEFAULT_SKIP_TESTS[@]:+${GKE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_DEFAULT_SKIP_TESTS[@]:+${GCE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
           ${GCE_SLOW_TESTS[@]:+${GCE_SLOW_TESTS[@]}} \
@@ -682,6 +889,7 @@ case ${JOB_NAME} in
     : ${E2E_CLUSTER_NAME:="gke-upgrade-stable-latest"}
     : ${E2E_NETWORK:="gke-upgrade-stable-latest"}
     : ${JENKINS_PUBLISHED_VERSION:="release/stable"}
+    : ${E2E_SET_CLUSTER_API_VERSION:=y}
     : ${PROJECT:="k8s-jkns-upgrade-fixed-1"}
     : ${E2E_UP:="true"}
     : ${E2E_TEST:="false"}
@@ -694,8 +902,8 @@ case ${JOB_NAME} in
     : ${E2E_CLUSTER_NAME:="gke-upgrade-stable-latest"}
     : ${E2E_NETWORK:="gke-upgrade-stable-latest"}
     : ${E2E_OPT:="--check_version_skew=false"}
-    # We have to get tars at ci/latest (JENKINS_PUBLISHED_VERSION default) to
-    # get the latest upgrade logic.
+    # Use upgrade logic of version we're upgrading to.
+    : ${JENKINS_PUBLISHED_VERSION:="release/latest"}
     : ${JENKINS_FORCE_GET_TARS:=y}
     : ${PROJECT:="k8s-jkns-upgrade-fixed-1"}
     : ${E2E_UP:="false"}
@@ -718,7 +926,7 @@ case ${JOB_NAME} in
     : ${E2E_TEST:="true"}
     : ${E2E_DOWN:="false"}
     : ${GINKGO_TEST_ARGS:="--ginkgo.skip=$(join_regex_allow_empty \
-          ${GKE_REQUIRED_SKIP_TESTS[@]:+${GKE_REQUIRED_SKIP_TESTS[@]}} \
+          ${GKE_DEFAULT_SKIP_TESTS[@]:+${GKE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_DEFAULT_SKIP_TESTS[@]:+${GCE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
           )"}
@@ -730,8 +938,8 @@ case ${JOB_NAME} in
     : ${E2E_CLUSTER_NAME:="gke-upgrade-stable-latest"}
     : ${E2E_NETWORK:="gke-upgrade-stable-latest"}
     : ${E2E_OPT:="--check_version_skew=false"}
-    # We have to get tars at ci/latest (JENKINS_PUBLISHED_VERSION default) to
-    # get the latest upgrade logic.
+    # Use upgrade logic of version we're upgrading to.
+    : ${JENKINS_PUBLISHED_VERSION:="release/latest"}
     : ${JENKINS_FORCE_GET_TARS:=y}
     : ${PROJECT:="k8s-jkns-upgrade-fixed-1"}
     : ${E2E_UP:="false"}
@@ -754,7 +962,7 @@ case ${JOB_NAME} in
     : ${E2E_TEST:="true"}
     : ${E2E_DOWN:="false"}
     : ${GINKGO_TEST_ARGS:="--ginkgo.skip=$(join_regex_allow_empty \
-          ${GKE_REQUIRED_SKIP_TESTS[@]:+${GKE_REQUIRED_SKIP_TESTS[@]}} \
+          ${GKE_DEFAULT_SKIP_TESTS[@]:+${GKE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_DEFAULT_SKIP_TESTS[@]:+${GCE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
           )"}
@@ -772,7 +980,7 @@ case ${JOB_NAME} in
     : ${E2E_TEST:="true"}
     : ${E2E_DOWN:="true"}
     : ${GINKGO_TEST_ARGS:="--ginkgo.skip=$(join_regex_allow_empty \
-          ${GKE_REQUIRED_SKIP_TESTS[@]:+${GKE_REQUIRED_SKIP_TESTS[@]}} \
+          ${GKE_DEFAULT_SKIP_TESTS[@]:+${GKE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_DEFAULT_SKIP_TESTS[@]:+${GCE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
           ${GCE_SLOW_TESTS[@]:+${GCE_SLOW_TESTS[@]}} \
@@ -783,11 +991,11 @@ case ${JOB_NAME} in
   #
   # This suite:
   #
-  # 1. launches a cluster at release/latest-1.0,
+  # 1. launches a cluster at ci/latest-1.0,
   # 2. upgrades the master to ci/latest-1.1
-  # 3. runs release/latest-1.0 e2es,
+  # 3. runs ci/latest-1.0 e2es,
   # 4. upgrades the rest of the cluster,
-  # 5. runs release/latest-1.0 e2es again, then
+  # 5. runs ci/latest-1.0 e2es again, then
   # 6. runs ci/latest-1.1 e2es and tears down the cluster.
 
   kubernetes-upgrade-1.0-1.1-gke-step1-deploy)
@@ -795,7 +1003,8 @@ case ${JOB_NAME} in
     : ${GKE_API_ENDPOINT:="https://test-container.sandbox.googleapis.com/"}
     : ${E2E_CLUSTER_NAME:="gke-upgrade-1-0"}
     : ${E2E_NETWORK:="gke-upgrade-1-0"}
-    : ${JENKINS_PUBLISHED_VERSION:="release/latest-1.0"}
+    : ${JENKINS_PUBLISHED_VERSION:="ci/latest-1.0"}
+    : ${E2E_SET_CLUSTER_API_VERSION:=y}
     : ${PROJECT:="kubernetes-jenkins-gke-upgrade"}
     : ${E2E_UP:="true"}
     : ${E2E_TEST:="false"}
@@ -808,8 +1017,8 @@ case ${JOB_NAME} in
     : ${E2E_CLUSTER_NAME:="gke-upgrade-1-0"}
     : ${E2E_NETWORK:="gke-upgrade-1-0"}
     : ${E2E_OPT:="--check_version_skew=false"}
-    # We have to get tars at ci/latest (JENKINS_PUBLISHED_VERSION default) to
-    # get the latest upgrade logic.
+    # Use upgrade logic of version we're upgrading to.
+    : ${JENKINS_PUBLISHED_VERSION:="ci/latest-1.1"}
     : ${JENKINS_FORCE_GET_TARS:=y}
     : ${PROJECT:="kubernetes-jenkins-gke-upgrade"}
     : ${E2E_UP:="false"}
@@ -826,13 +1035,13 @@ case ${JOB_NAME} in
     : ${E2E_OPT:="--check_version_skew=false"}
     : ${JENKINS_FORCE_GET_TARS:=y}
     # Run old e2es
-    : ${JENKINS_PUBLISHED_VERSION:="release/latest-1.0"}
+    : ${JENKINS_PUBLISHED_VERSION:="ci/latest-1.0"}
     : ${PROJECT:="kubernetes-jenkins-gke-upgrade"}
     : ${E2E_UP:="false"}
     : ${E2E_TEST:="true"}
     : ${E2E_DOWN:="false"}
     : ${GINKGO_TEST_ARGS:="--ginkgo.skip=$(join_regex_allow_empty \
-          ${GKE_REQUIRED_SKIP_TESTS[@]:+${GKE_REQUIRED_SKIP_TESTS[@]}} \
+          ${GKE_DEFAULT_SKIP_TESTS[@]:+${GKE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_DEFAULT_SKIP_TESTS[@]:+${GCE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
           )"}
@@ -844,8 +1053,8 @@ case ${JOB_NAME} in
     : ${E2E_CLUSTER_NAME:="gke-upgrade-1-0"}
     : ${E2E_NETWORK:="gke-upgrade-1-0"}
     : ${E2E_OPT:="--check_version_skew=false"}
-    # We have to get tars at ci/latest (JENKINS_PUBLISHED_VERSION default) to
-    # get the latest upgrade logic.
+    # Use upgrade logic of version we're upgrading to.
+    : ${JENKINS_PUBLISHED_VERSION:="ci/latest-1.1"}
     : ${JENKINS_FORCE_GET_TARS:=y}
     : ${PROJECT:="kubernetes-jenkins-gke-upgrade"}
     : ${E2E_UP:="false"}
@@ -862,13 +1071,13 @@ case ${JOB_NAME} in
     : ${E2E_OPT:="--check_version_skew=false"}
     : ${JENKINS_FORCE_GET_TARS:=y}
     # Run old e2es
-    : ${JENKINS_PUBLISHED_VERSION:="release/latest-1.0"}
+    : ${JENKINS_PUBLISHED_VERSION:="ci/latest-1.0"}
     : ${PROJECT:="kubernetes-jenkins-gke-upgrade"}
     : ${E2E_UP:="false"}
     : ${E2E_TEST:="true"}
     : ${E2E_DOWN:="false"}
     : ${GINKGO_TEST_ARGS:="--ginkgo.skip=$(join_regex_allow_empty \
-          ${GKE_REQUIRED_SKIP_TESTS[@]:+${GKE_REQUIRED_SKIP_TESTS[@]}} \
+          ${GKE_DEFAULT_SKIP_TESTS[@]:+${GKE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_DEFAULT_SKIP_TESTS[@]:+${GCE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
           )"}
@@ -889,7 +1098,7 @@ case ${JOB_NAME} in
     : ${E2E_TEST:="true"}
     : ${E2E_DOWN:="true"}
     : ${GINKGO_TEST_ARGS:="--ginkgo.skip=$(join_regex_allow_empty \
-          ${GKE_REQUIRED_SKIP_TESTS[@]:+${GKE_REQUIRED_SKIP_TESTS[@]}} \
+          ${GKE_DEFAULT_SKIP_TESTS[@]:+${GKE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_DEFAULT_SKIP_TESTS[@]:+${GCE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
           ${GCE_SLOW_TESTS[@]:+${GCE_SLOW_TESTS[@]}} \
@@ -915,7 +1124,6 @@ case ${JOB_NAME} in
     : ${E2E_UP:="true"}
     : ${E2E_TEST:="false"}
     : ${E2E_DOWN:="false"}
-    : ${ENABLE_EXPERIMENTAL_API:=true}
     : ${NUM_MINIONS:=5}
     ;;
 
@@ -929,8 +1137,9 @@ case ${JOB_NAME} in
     : ${E2E_TEST:="true"}
     : ${E2E_DOWN:="false"}
     : ${GINKGO_TEST_ARGS:="--ginkgo.focus=Skipped.*Cluster\supgrade.*upgrade-master"}
-    : ${ENABLE_EXPERIMENTAL_API:=true}
     : ${NUM_MINIONS:=5}
+    : ${KUBE_ENABLE_DEPLOYMENTS:=true}
+    : ${KUBE_ENABLE_DAEMONSETS:=true}
     ;;
 
   kubernetes-upgrade-gce-step3-e2e-old)
@@ -950,7 +1159,6 @@ case ${JOB_NAME} in
           ${GCE_DEFAULT_SKIP_TESTS[@]:+${GCE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
           )"}
-    : ${ENABLE_EXPERIMENTAL_API:=true}
     : ${NUM_MINIONS:=5}
     ;;
 
@@ -964,8 +1172,9 @@ case ${JOB_NAME} in
     : ${E2E_TEST:="true"}
     : ${E2E_DOWN:="false"}
     : ${GINKGO_TEST_ARGS:="--ginkgo.focus=Skipped.*Cluster\supgrade.*upgrade-cluster"}
-    : ${ENABLE_EXPERIMENTAL_API:=true}
     : ${NUM_MINIONS:=5}
+    : ${KUBE_ENABLE_DEPLOYMENTS:=true}
+    : ${KUBE_ENABLE_DAEMONSETS:=true}
     ;;
 
   kubernetes-upgrade-gce-step5-e2e-old)
@@ -983,7 +1192,6 @@ case ${JOB_NAME} in
           ${GCE_DEFAULT_SKIP_TESTS[@]:+${GCE_DEFAULT_SKIP_TESTS[@]}} \
           ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
           )"}
-    : ${ENABLE_EXPERIMENTAL_API:=true}
     : ${NUM_MINIONS:=5}
     ;;
 
@@ -1003,7 +1211,6 @@ case ${JOB_NAME} in
           ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
           ${GCE_SLOW_TESTS[@]:+${GCE_SLOW_TESTS[@]}} \
           )"}
-    : ${ENABLE_EXPERIMENTAL_API:=true}
     : ${NUM_MINIONS:=5}
     ;;
 
@@ -1011,23 +1218,22 @@ case ${JOB_NAME} in
   #
   # This suite:
   #
-  # 1. launches a cluster at release/latest-1.0,
+  # 1. launches a cluster at ci/latest-1.0,
   # 2. upgrades the master to ci/latest-1.1
-  # 3. runs release/latest-1.0 e2es,
+  # 3. runs ci/latest-1.0 e2es,
   # 4. upgrades the rest of the cluster,
-  # 5. runs release/latest-1.0 e2es again, then
+  # 5. runs ci/latest-1.0 e2es again, then
   # 6. runs ci/latest-1.1 e2es and tears down the cluster.
 
     kubernetes-upgrade-1.0-1.1-gce-step1-deploy)
     : ${E2E_CLUSTER_NAME:="gce-upgrade-1-0"}
     : ${E2E_NETWORK:="gce-upgrade-1-0"}
-    : ${JENKINS_PUBLISHED_VERSION:="release/latest-1.0"}
+    : ${JENKINS_PUBLISHED_VERSION:="ci/latest-1.0"}
     : ${PROJECT:="k8s-jkns-gce-upgrade"}
     : ${E2E_UP:="true"}
     : ${E2E_TEST:="false"}
     : ${E2E_DOWN:="false"}
     : ${KUBE_GCE_INSTANCE_PREFIX:="e2e-upgrade-1-0"}
-    : ${ENABLE_EXPERIMENTAL_API:=true}
     : ${NUM_MINIONS:=5}
     ;;
 
@@ -1035,8 +1241,8 @@ case ${JOB_NAME} in
     : ${E2E_CLUSTER_NAME:="gce-upgrade-1-0"}
     : ${E2E_NETWORK:="gce-upgrade-1-0"}
     : ${E2E_OPT:="--check_version_skew=false"}
-    # We have to get tars at ci/latest (JENKINS_PUBLISHED_VERSION default) to
-    # get the latest upgrade logic.
+    # Use upgrade logic of version we're upgrading to.
+    : ${JENKINS_PUBLISHED_VERSION:="ci/latest-1.1"}
     : ${JENKINS_FORCE_GET_TARS:=y}
     : ${PROJECT:="k8s-jkns-gce-upgrade"}
     : ${E2E_UP:="false"}
@@ -1044,8 +1250,9 @@ case ${JOB_NAME} in
     : ${E2E_DOWN:="false"}
     : ${GINKGO_TEST_ARGS:="--ginkgo.focus=Skipped.*Cluster\supgrade.*upgrade-master --upgrade-target=ci/latest-1.1"}
     : ${KUBE_GCE_INSTANCE_PREFIX:="e2e-upgrade-1-0"}
-    : ${ENABLE_EXPERIMENTAL_API:=true}
     : ${NUM_MINIONS:=5}
+    : ${KUBE_ENABLE_DEPLOYMENTS:=true}
+    : ${KUBE_ENABLE_DAEMONSETS:=true}
     ;;
 
   kubernetes-upgrade-1.0-1.1-gce-step3-e2e-old)
@@ -1054,7 +1261,7 @@ case ${JOB_NAME} in
     : ${E2E_OPT:="--check_version_skew=false"}
     : ${JENKINS_FORCE_GET_TARS:=y}
     # Run old e2es
-    : ${JENKINS_PUBLISHED_VERSION:="release/latest-1.0"}
+    : ${JENKINS_PUBLISHED_VERSION:="ci/latest-1.0"}
     : ${PROJECT:="k8s-jkns-gce-upgrade"}
     : ${E2E_UP:="false"}
     : ${E2E_TEST:="true"}
@@ -1064,7 +1271,6 @@ case ${JOB_NAME} in
           ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
           )"}
     : ${KUBE_GCE_INSTANCE_PREFIX:="e2e-upgrade-1-0"}
-    : ${ENABLE_EXPERIMENTAL_API:=true}
     : ${NUM_MINIONS:=5}
     ;;
 
@@ -1072,8 +1278,8 @@ case ${JOB_NAME} in
     : ${E2E_CLUSTER_NAME:="gce-upgrade-1-0"}
     : ${E2E_NETWORK:="gce-upgrade-1-0"}
     : ${E2E_OPT:="--check_version_skew=false"}
-    # We have to get tars at ci/latest (JENKINS_PUBLISHED_VERSION default) to
-    # get the latest upgrade logic.
+    # Use upgrade logic of version we're upgrading to.
+    : ${JENKINS_PUBLISHED_VERSION:="ci/latest-1.1"}
     : ${JENKINS_FORCE_GET_TARS:=y}
     : ${PROJECT:="k8s-jkns-gce-upgrade"}
     : ${E2E_UP:="false"}
@@ -1081,8 +1287,9 @@ case ${JOB_NAME} in
     : ${E2E_DOWN:="false"}
     : ${GINKGO_TEST_ARGS:="--ginkgo.focus=Skipped.*Cluster\supgrade.*upgrade-cluster --upgrade-target=ci/latest-1.1"}
     : ${KUBE_GCE_INSTANCE_PREFIX:="e2e-upgrade-1-0"}
-    : ${ENABLE_EXPERIMENTAL_API:=true}
     : ${NUM_MINIONS:=5}
+    : ${KUBE_ENABLE_DEPLOYMENTS:=true}
+    : ${KUBE_ENABLE_DAEMONSETS:=true}
     ;;
 
   kubernetes-upgrade-1.0-1.1-gce-step5-e2e-old)
@@ -1091,7 +1298,7 @@ case ${JOB_NAME} in
     : ${E2E_OPT:="--check_version_skew=false"}
     : ${JENKINS_FORCE_GET_TARS:=y}
     # Run old e2es
-    : ${JENKINS_PUBLISHED_VERSION:="release/latest-1.0"}
+    : ${JENKINS_PUBLISHED_VERSION:="ci/latest-1.0"}
     : ${PROJECT:="k8s-jkns-gce-upgrade"}
     : ${E2E_UP:="false"}
     : ${E2E_TEST:="true"}
@@ -1101,7 +1308,6 @@ case ${JOB_NAME} in
           ${GCE_FLAKY_TESTS[@]:+${GCE_FLAKY_TESTS[@]}} \
           )"}
     : ${KUBE_GCE_INSTANCE_PREFIX:="e2e-upgrade-1-0"}
-    : ${ENABLE_EXPERIMENTAL_API:=true}
     : ${NUM_MINIONS:=5}
     ;;
 
@@ -1123,11 +1329,9 @@ case ${JOB_NAME} in
           ${GCE_SLOW_TESTS[@]:+${GCE_SLOW_TESTS[@]}} \
           )"}
     : ${KUBE_GCE_INSTANCE_PREFIX:="e2e-upgrade-1-0"}
-    : ${ENABLE_EXPERIMENTAL_API:=true}
     : ${NUM_MINIONS:=5}
     ;;
 
-  
   # Run Kubemark test on a fake 100 node cluster to have a comparison
   # to the real results from scalability suite
   kubernetes-kubemark-gce)
@@ -1200,6 +1404,9 @@ export KUBE_GCE_ZONE=${E2E_ZONE}
 export KUBE_GCE_NETWORK=${E2E_NETWORK}
 export KUBE_GCE_INSTANCE_PREFIX=${KUBE_GCE_INSTANCE_PREFIX:-}
 export KUBE_GCS_STAGING_PATH_SUFFIX=${KUBE_GCS_STAGING_PATH_SUFFIX:-}
+export KUBE_GCE_MINION_PROJECT=${KUBE_GCE_MINION_PROJECT:-}
+export KUBE_GCE_MINION_IMAGE=${KUBE_GCE_MINION_IMAGE:-}
+export KUBE_OS_DISTRIBUTION=${KUBE_OS_DISTRIBUTION:-}
 
 # GKE variables
 export CLUSTER_NAME=${E2E_CLUSTER_NAME}
@@ -1208,6 +1415,7 @@ export KUBE_GKE_NETWORK=${E2E_NETWORK}
 export E2E_SET_CLUSTER_API_VERSION=${E2E_SET_CLUSTER_API_VERSION:-}
 export DOGFOOD_GCLOUD=${DOGFOOD_GCLOUD:-}
 export CMD_GROUP=${CMD_GROUP:-}
+export MACHINE_TYPE=${MINION_SIZE:-}  # GKE scripts use MACHINE_TYPE for the node vm size
 
 if [[ ! -z "${GKE_API_ENDPOINT:-}" ]]; then
   export CLOUDSDK_API_ENDPOINT_OVERRIDES_CONTAINER=${GKE_API_ENDPOINT}
@@ -1216,6 +1424,8 @@ fi
 # Shared cluster variables
 export E2E_MIN_STARTUP_PODS=${E2E_MIN_STARTUP_PODS:-}
 export KUBE_ENABLE_CLUSTER_MONITORING=${ENABLE_CLUSTER_MONITORING:-}
+export KUBE_ENABLE_CLUSTER_REGISTRY=${ENABLE_CLUSTER_REGISTRY:-}
+export KUBE_ENABLE_HORIZONTAL_POD_AUTOSCALER=${ENABLE_HORIZONTAL_POD_AUTOSCALER:-}
 export KUBE_ENABLE_DEPLOYMENTS=${ENABLE_DEPLOYMENTS:-}
 export KUBE_ENABLE_EXPERIMENTAL_API=${ENABLE_EXPERIMENTAL_API:-}
 export MASTER_SIZE=${MASTER_SIZE:-}
@@ -1225,6 +1435,7 @@ export NUM_MINIONS=${NUM_MINIONS:-}
 export TEST_CLUSTER_LOG_LEVEL=${TEST_CLUSTER_LOG_LEVEL:-}
 export TEST_CLUSTER_RESYNC_PERIOD=${TEST_CLUSTER_RESYNC_PERIOD:-}
 export PROJECT=${PROJECT:-}
+export JENKINS_EXPLICIT_VERSION=${JENKINS_EXPLICIT_VERSION:-}
 export JENKINS_PUBLISHED_VERSION=${JENKINS_PUBLISHED_VERSION:-'ci/latest'}
 
 export KUBE_ADMISSION_CONTROL=${ADMISSION_CONTROL:-}
@@ -1436,7 +1647,7 @@ if [[ "${USE_KUBEMARK:-}" == "true" ]]; then
   NUM_MINIONS=${KUBEMARK_NUM_MINIONS:-$NUM_MINIONS}
   MASTER_SIZE=${KUBEMARK_MASTER_SIZE:-$MASTER_SIZE}
   ./test/kubemark/start-kubemark.sh
-  ./test/kubemark/run-e2e-tests.sh && exitcode=0 || exitcode=$?
+  ./test/kubemark/run-e2e-tests.sh --ginkgo.focus="should\sallow\sstarting\s30\spods\sper\snode" --delete-namespace="false" --gather-resource-usage="false"
   ./test/kubemark/stop-kubemark.sh
   NUM_MINIONS=${NUM_MINIONS_BKP}
   MASTER_SIZE=${MASTER_SIZE_BKP}

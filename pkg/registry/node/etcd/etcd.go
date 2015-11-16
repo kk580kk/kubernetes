@@ -23,6 +23,7 @@ import (
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/rest"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
+	"k8s.io/kubernetes/pkg/registry/generic"
 	etcdgeneric "k8s.io/kubernetes/pkg/registry/generic/etcd"
 	"k8s.io/kubernetes/pkg/registry/node"
 	"k8s.io/kubernetes/pkg/runtime"
@@ -50,27 +51,16 @@ func (r *StatusREST) Update(ctx api.Context, obj runtime.Object) (runtime.Object
 }
 
 // NewREST returns a RESTStorage object that will work against nodes.
-func NewREST(s storage.Interface, useCacher bool, connection client.ConnectionInfoGetter, proxyTransport http.RoundTripper) (*REST, *StatusREST) {
+func NewREST(s storage.Interface, storageDecorator generic.StorageDecorator, connection client.ConnectionInfoGetter, proxyTransport http.RoundTripper) (*REST, *StatusREST) {
 	prefix := "/minions"
 
-	storageInterface := s
-	if useCacher {
-		config := storage.CacherConfig{
-			CacheCapacity:  1000,
-			Storage:        s,
-			Type:           &api.Node{},
-			ResourcePrefix: prefix,
-			KeyFunc: func(obj runtime.Object) (string, error) {
-				return storage.NoNamespaceKeyFunc(prefix, obj)
-			},
-			NewListFunc: func() runtime.Object { return &api.NodeList{} },
-		}
-		storageInterface = storage.NewCacher(config)
-	}
+	newListFunc := func() runtime.Object { return &api.NodeList{} }
+	storageInterface := storageDecorator(
+		s, 1000, &api.Node{}, prefix, false, newListFunc)
 
 	store := &etcdgeneric.Etcd{
 		NewFunc:     func() runtime.Object { return &api.Node{} },
-		NewListFunc: func() runtime.Object { return &api.NodeList{} },
+		NewListFunc: newListFunc,
 		KeyRootFunc: func(ctx api.Context) string {
 			return prefix
 		},

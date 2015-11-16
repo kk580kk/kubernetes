@@ -19,8 +19,8 @@ If you are using a released version of Kubernetes, you should
 refer to the docs that go with that version.
 
 <strong>
-The latest 1.0.x release of this document can be found
-[here](http://releases.k8s.io/release-1.0/docs/getting-started-guides/vagrant.md).
+The latest release of this document can be found
+[here](http://releases.k8s.io/release-1.1/docs/getting-started-guides/vagrant.md).
 
 Documentation for other releases can be found at
 [releases.k8s.io](http://releases.k8s.io).
@@ -284,7 +284,10 @@ my-nginx-xql4j   1/1       Running   0          1m
 
 $ ./cluster/kubectl.sh get services
 NAME              CLUSTER_IP       EXTERNAL_IP       PORT(S)       SELECTOR               AGE
-my-nginx          10.0.0.1         <none>            80/TCP        run=my-nginx           1h
+
+$ ./cluster/kubectl.sh get replicationcontrollers
+CONTROLLER   CONTAINER(S)   IMAGE(S)   SELECTOR       REPLICAS   AGE
+my-nginx     my-nginx       nginx      run=my-nginx   3          1m
 ```
 
 We did not start any services, hence there are none listed. But we see three replicas displayed properly.

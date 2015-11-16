@@ -49,12 +49,13 @@ import (
 	replicationcontroller "k8s.io/kubernetes/pkg/controller/replication"
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/kubelet/cadvisor"
+	"k8s.io/kubernetes/pkg/kubelet/cm"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/dockertools"
 	kubetypes "k8s.io/kubernetes/pkg/kubelet/types"
 	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/master"
-	"k8s.io/kubernetes/pkg/tools/etcdtest"
+	"k8s.io/kubernetes/pkg/storage/etcd/etcdtest"
 	"k8s.io/kubernetes/pkg/util"
 	"k8s.io/kubernetes/pkg/util/sets"
 	"k8s.io/kubernetes/pkg/util/wait"
@@ -215,8 +216,8 @@ func startComponents(firstManifestURL, secondManifestURL string) (string, string
 	testRootDir := integration.MakeTempDirOrDie("kubelet_integ_1.", "")
 	configFilePath := integration.MakeTempDirOrDie("config", testRootDir)
 	glog.Infof("Using %s as root dir for kubelet #1", testRootDir)
-	fakeDocker1.VersionInfo = docker.Env{"ApiVersion=1.15"}
-
+	fakeDocker1.VersionInfo = docker.Env{"ApiVersion=1.20"}
+	cm := cm.NewStubContainerManager()
 	kcfg := kubeletapp.SimpleKubelet(
 		cl,
 		&fakeDocker1,
@@ -238,7 +239,8 @@ func startComponents(firstManifestURL, secondManifestURL string) (string, string
 		10*time.Second, /* MinimumGCAge */
 		3*time.Second,  /* NodeStatusUpdateFrequency */
 		10*time.Second, /* SyncFrequency */
-		40 /* MaxPods */)
+		40,             /* MaxPods */
+		cm)
 
 	kubeletapp.RunKubelet(kcfg)
 	// Kubelet (machine)
@@ -246,7 +248,7 @@ func startComponents(firstManifestURL, secondManifestURL string) (string, string
 	// have a place they can schedule.
 	testRootDir = integration.MakeTempDirOrDie("kubelet_integ_2.", "")
 	glog.Infof("Using %s as root dir for kubelet #2", testRootDir)
-	fakeDocker2.VersionInfo = docker.Env{"ApiVersion=1.15"}
+	fakeDocker2.VersionInfo = docker.Env{"ApiVersion=1.20"}
 
 	kcfg = kubeletapp.SimpleKubelet(
 		cl,
@@ -270,7 +272,8 @@ func startComponents(firstManifestURL, secondManifestURL string) (string, string
 		3*time.Second,  /* NodeStatusUpdateFrequency */
 		10*time.Second, /* SyncFrequency */
 
-		40 /* MaxPods */)
+		40, /* MaxPods */
+		cm)
 
 	kubeletapp.RunKubelet(kcfg)
 	return apiServer.URL, configFilePath
@@ -308,6 +311,7 @@ func podsOnNodes(c *client.Client, podNamespace string, labelSelector labels.Sel
 				return false, nil
 			}
 			if pod.Status.Phase != api.PodRunning {
+				glog.Infof("Pod %q is not running, status: %v", podString, pod.Status.Phase)
 				return false, nil
 			}
 		}

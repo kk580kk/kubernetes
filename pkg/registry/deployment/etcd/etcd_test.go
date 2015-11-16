@@ -24,16 +24,17 @@ import (
 	"k8s.io/kubernetes/pkg/apis/extensions"
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
+	"k8s.io/kubernetes/pkg/registry/generic"
 	"k8s.io/kubernetes/pkg/registry/registrytest"
 	"k8s.io/kubernetes/pkg/runtime"
+	"k8s.io/kubernetes/pkg/storage/etcd/etcdtest"
 	"k8s.io/kubernetes/pkg/tools"
-	"k8s.io/kubernetes/pkg/tools/etcdtest"
 	"k8s.io/kubernetes/pkg/util"
 )
 
 func newStorage(t *testing.T) (*DeploymentStorage, *tools.FakeEtcdClient) {
 	etcdStorage, fakeClient := registrytest.NewEtcdStorage(t, "extensions")
-	deploymentStorage := NewStorage(etcdStorage)
+	deploymentStorage := NewStorage(etcdStorage, generic.UndecoratedStorage)
 	return &deploymentStorage, fakeClient
 }
 
@@ -48,7 +49,7 @@ func validNewDeployment() *extensions.Deployment {
 		},
 		Spec: extensions.DeploymentSpec{
 			Selector: map[string]string{"a": "b"},
-			Template: &api.PodTemplateSpec{
+			Template: api.PodTemplateSpec{
 				ObjectMeta: api.ObjectMeta{
 					Labels: map[string]string{"a": "b"},
 				},

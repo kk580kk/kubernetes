@@ -25,6 +25,7 @@ import (
 	_ "k8s.io/kubernetes/pkg/apis/extensions/v1beta1"
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
+	"k8s.io/kubernetes/pkg/registry/generic"
 	"k8s.io/kubernetes/pkg/registry/registrytest"
 	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/tools"
@@ -32,8 +33,8 @@ import (
 
 func newStorage(t *testing.T) (*REST, *StatusREST, *tools.FakeEtcdClient) {
 	etcdStorage, fakeClient := registrytest.NewEtcdStorage(t, "extensions")
-	storage, statusStorage := NewREST(etcdStorage)
-	return storage, statusStorage, fakeClient
+	horizontalPodAutoscalerStorage, statusStorage := NewREST(etcdStorage, generic.UndecoratedStorage)
+	return horizontalPodAutoscalerStorage, statusStorage, fakeClient
 }
 
 func validNewHorizontalPodAutoscaler(name string) *extensions.HorizontalPodAutoscaler {
@@ -44,6 +45,8 @@ func validNewHorizontalPodAutoscaler(name string) *extensions.HorizontalPodAutos
 		},
 		Spec: extensions.HorizontalPodAutoscalerSpec{
 			ScaleRef: extensions.SubresourceReference{
+				Kind:        "ReplicationController",
+				Name:        "myrc",
 				Subresource: "scale",
 			},
 			MaxReplicas:    5,

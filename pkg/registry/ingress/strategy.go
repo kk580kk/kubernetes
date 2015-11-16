@@ -76,6 +76,10 @@ func (ingressStrategy) Validate(ctx api.Context, obj runtime.Object) fielderrors
 	return err
 }
 
+// Canonicalize normalizes the object after validation.
+func (ingressStrategy) Canonicalize(obj runtime.Object) {
+}
+
 // AllowCreateOnUpdate is false for Ingress; this means POST is needed to create one.
 func (ingressStrategy) AllowCreateOnUpdate() bool {
 	return false
@@ -84,7 +88,7 @@ func (ingressStrategy) AllowCreateOnUpdate() bool {
 // ValidateUpdate is the default update validation for an end user.
 func (ingressStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
 	validationErrorList := validation.ValidateIngress(obj.(*extensions.Ingress))
-	updateErrorList := validation.ValidateIngressUpdate(old.(*extensions.Ingress), obj.(*extensions.Ingress))
+	updateErrorList := validation.ValidateIngressUpdate(obj.(*extensions.Ingress), old.(*extensions.Ingress))
 	return append(validationErrorList, updateErrorList...)
 }
 
@@ -95,7 +99,7 @@ func (ingressStrategy) AllowUnconditionalUpdate() bool {
 
 // IngressToSelectableFields returns a field set that represents the object.
 func IngressToSelectableFields(ingress *extensions.Ingress) fields.Set {
-	return generic.ObjectMetaFieldsSet(ingress.ObjectMeta)
+	return generic.ObjectMetaFieldsSet(ingress.ObjectMeta, true)
 }
 
 // MatchIngress is the filter used by the generic etcd backend to ingress

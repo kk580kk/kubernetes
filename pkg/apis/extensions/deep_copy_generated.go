@@ -583,6 +583,9 @@ func deepCopy_api_Probe(in api.Probe, out *api.Probe, c *conversion.Cloner) erro
 	}
 	out.InitialDelaySeconds = in.InitialDelaySeconds
 	out.TimeoutSeconds = in.TimeoutSeconds
+	out.PeriodSeconds = in.PeriodSeconds
+	out.SuccessThreshold = in.SuccessThreshold
+	out.FailureThreshold = in.FailureThreshold
 	return nil
 }
 
@@ -1049,13 +1052,8 @@ func deepCopy_extensions_DeploymentSpec(in DeploymentSpec, out *DeploymentSpec, 
 	} else {
 		out.Selector = nil
 	}
-	if in.Template != nil {
-		out.Template = new(api.PodTemplateSpec)
-		if err := deepCopy_api_PodTemplateSpec(*in.Template, out.Template, c); err != nil {
-			return err
-		}
-	} else {
-		out.Template = nil
+	if err := deepCopy_api_PodTemplateSpec(in.Template, &out.Template, c); err != nil {
+		return err
 	}
 	if err := deepCopy_extensions_DeploymentStrategy(in.Strategy, &out.Strategy, c); err != nil {
 		return err
@@ -1488,7 +1486,6 @@ func deepCopy_extensions_ScaleStatus(in ScaleStatus, out *ScaleStatus, c *conver
 
 func deepCopy_extensions_SubresourceReference(in SubresourceReference, out *SubresourceReference, c *conversion.Cloner) error {
 	out.Kind = in.Kind
-	out.Namespace = in.Namespace
 	out.Name = in.Name
 	out.APIVersion = in.APIVersion
 	out.Subresource = in.Subresource

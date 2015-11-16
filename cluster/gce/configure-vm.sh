@@ -32,11 +32,11 @@ function ensure-basic-networking() {
     echo 'Waiting for functional DNS (trying to resolve metadata.google.internal)...'
     sleep 3
   done
-  until getent hosts $(hostname -f) &>/dev/null; do
+  until getent hosts $(hostname -f || echo _error_) &>/dev/null; do
     echo 'Waiting for functional DNS (trying to resolve my own FQDN)...'
     sleep 3
   done
-  until getent hosts $(hostname -i) &>/dev/null; do
+  until getent hosts $(hostname -i || echo _error_) &>/dev/null; do
     echo 'Waiting for functional DNS (trying to resolve my own IP)...'
     sleep 3
   done
@@ -268,6 +268,7 @@ service_cluster_ip_range: '$(echo "$SERVICE_CLUSTER_IP_RANGE" | sed -e "s/'/''/g
 enable_cluster_monitoring: '$(echo "$ENABLE_CLUSTER_MONITORING" | sed -e "s/'/''/g")'
 enable_cluster_logging: '$(echo "$ENABLE_CLUSTER_LOGGING" | sed -e "s/'/''/g")'
 enable_cluster_ui: '$(echo "$ENABLE_CLUSTER_UI" | sed -e "s/'/''/g")'
+enable_l7_loadbalancing: '$(echo "$ENABLE_L7_LOADBALANCING" | sed -e "s/'/''/g")'
 enable_node_logging: '$(echo "$ENABLE_NODE_LOGGING" | sed -e "s/'/''/g")'
 logging_destination: '$(echo "$LOGGING_DESTINATION" | sed -e "s/'/''/g")'
 elasticsearch_replicas: '$(echo "$ELASTICSEARCH_LOGGING_REPLICAS" | sed -e "s/'/''/g")'
@@ -285,6 +286,7 @@ enable_manifest_url: '$(echo "$ENABLE_MANIFEST_URL" | sed -e "s/'/''/g")'
 manifest_url: '$(echo "$MANIFEST_URL" | sed -e "s/'/''/g")'
 manifest_url_header: '$(echo "$MANIFEST_URL_HEADER" | sed -e "s/'/''/g")'
 num_nodes: $(echo "${NUM_MINIONS}")
+e2e_storage_test_environment: '$(echo "$E2E_STORAGE_TEST_ENVIRONMENT" | sed -e "s/'/''/g")'
 EOF
 
     if [ -n "${APISERVER_TEST_ARGS:-}" ]; then
@@ -318,11 +320,6 @@ EOF
 cluster_registry_disk_type: gce
 cluster_registry_disk_size: $(convert-bytes-gce-kube ${CLUSTER_REGISTRY_DISK_SIZE})
 cluster_registry_disk_name: ${CLUSTER_REGISTRY_DISK}
-EOF
-    fi
-    if [ -n "${ENABLE_EXPERIMENTAL_API:-}" ]; then
-      cat <<EOF >>/srv/salt-overlay/pillar/cluster-params.sls
-enable_experimental_api: '$(echo "$ENABLE_EXPERIMENTAL_API" | sed -e "s/'/''/g")'
 EOF
     fi
     if [ -n "${TERMINATED_POD_GC_THRESHOLD:-}" ]; then

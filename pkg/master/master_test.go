@@ -40,15 +40,13 @@ import (
 	"k8s.io/kubernetes/pkg/apis/extensions"
 	"k8s.io/kubernetes/pkg/apiserver"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/registry/endpoint"
 	"k8s.io/kubernetes/pkg/registry/namespace"
 	"k8s.io/kubernetes/pkg/registry/registrytest"
 	thirdpartyresourcedatastorage "k8s.io/kubernetes/pkg/registry/thirdpartyresourcedata/etcd"
 	etcdstorage "k8s.io/kubernetes/pkg/storage/etcd"
+	"k8s.io/kubernetes/pkg/storage/etcd/etcdtest"
 	"k8s.io/kubernetes/pkg/tools"
-	"k8s.io/kubernetes/pkg/tools/etcdtest"
 	"k8s.io/kubernetes/pkg/util"
 
 	"github.com/coreos/go-etcd/etcd"
@@ -338,14 +336,14 @@ func TestGetNodeAddresses(t *testing.T) {
 	master, _, assert := setUp(t)
 
 	// Fail case (no addresses associated with nodes)
-	nodes, _ := master.nodeRegistry.ListNodes(api.NewDefaultContext(), labels.Everything(), fields.Everything())
+	nodes, _ := master.nodeRegistry.ListNodes(api.NewDefaultContext(), nil)
 	addrs, err := master.getNodeAddresses()
 
 	assert.Error(err, "getNodeAddresses should have caused an error as there are no addresses.")
 	assert.Equal([]string(nil), addrs)
 
 	// Pass case with External type IP
-	nodes, _ = master.nodeRegistry.ListNodes(api.NewDefaultContext(), labels.Everything(), fields.Everything())
+	nodes, _ = master.nodeRegistry.ListNodes(api.NewDefaultContext(), nil)
 	for index := range nodes.Items {
 		nodes.Items[index].Status.Addresses = []api.NodeAddress{{Type: api.NodeExternalIP, Address: "127.0.0.1"}}
 	}
@@ -354,7 +352,7 @@ func TestGetNodeAddresses(t *testing.T) {
 	assert.Equal([]string{"127.0.0.1", "127.0.0.1"}, addrs)
 
 	// Pass case with LegacyHost type IP
-	nodes, _ = master.nodeRegistry.ListNodes(api.NewDefaultContext(), labels.Everything(), fields.Everything())
+	nodes, _ = master.nodeRegistry.ListNodes(api.NewDefaultContext(), nil)
 	for index := range nodes.Items {
 		nodes.Items[index].Status.Addresses = []api.NodeAddress{{Type: api.NodeLegacyHostIP, Address: "127.0.0.2"}}
 	}
@@ -401,13 +399,13 @@ func TestDiscoveryAtAPIS(t *testing.T) {
 	}
 
 	expectGroupName := "extensions"
-	expectVersions := []unversioned.GroupVersion{
+	expectVersions := []unversioned.GroupVersionForDiscovery{
 		{
 			GroupVersion: testapi.Extensions.GroupAndVersion(),
 			Version:      testapi.Extensions.Version(),
 		},
 	}
-	expectPreferredVersion := unversioned.GroupVersion{
+	expectPreferredVersion := unversioned.GroupVersionForDiscovery{
 		GroupVersion: config.StorageVersions["extensions"],
 		Version:      apiutil.GetVersion(config.StorageVersions["extensions"]),
 	}

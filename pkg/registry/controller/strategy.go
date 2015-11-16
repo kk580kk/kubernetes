@@ -81,6 +81,10 @@ func (rcStrategy) Validate(ctx api.Context, obj runtime.Object) fielderrors.Vali
 	return validation.ValidateReplicationController(controller)
 }
 
+// Canonicalize normalizes the object after validation.
+func (rcStrategy) Canonicalize(obj runtime.Object) {
+}
+
 // AllowCreateOnUpdate is false for replication controllers; this means a POST is
 // needed to create one.
 func (rcStrategy) AllowCreateOnUpdate() bool {
@@ -90,7 +94,7 @@ func (rcStrategy) AllowCreateOnUpdate() bool {
 // ValidateUpdate is the default update validation for an end user.
 func (rcStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
 	validationErrorList := validation.ValidateReplicationController(obj.(*api.ReplicationController))
-	updateErrorList := validation.ValidateReplicationControllerUpdate(old.(*api.ReplicationController), obj.(*api.ReplicationController))
+	updateErrorList := validation.ValidateReplicationControllerUpdate(obj.(*api.ReplicationController), old.(*api.ReplicationController))
 	return append(validationErrorList, updateErrorList...)
 }
 
@@ -100,7 +104,7 @@ func (rcStrategy) AllowUnconditionalUpdate() bool {
 
 // ControllerToSelectableFields returns a field set that represents the object.
 func ControllerToSelectableFields(controller *api.ReplicationController) fields.Set {
-	objectMetaFieldsSet := generic.ObjectMetaFieldsSet(controller.ObjectMeta)
+	objectMetaFieldsSet := generic.ObjectMetaFieldsSet(controller.ObjectMeta, true)
 	controllerSpecificFieldsSet := fields.Set{
 		"status.replicas": strconv.Itoa(controller.Status.Replicas),
 	}
@@ -138,5 +142,5 @@ func (rcStatusStrategy) PrepareForUpdate(obj, old runtime.Object) {
 }
 
 func (rcStatusStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
-	return validation.ValidateReplicationControllerStatusUpdate(old.(*api.ReplicationController), obj.(*api.ReplicationController))
+	return validation.ValidateReplicationControllerStatusUpdate(obj.(*api.ReplicationController), old.(*api.ReplicationController))
 }
